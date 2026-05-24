@@ -1,0 +1,3913 @@
+(function () {
+    const CLEANUP_KEY = '__chiyoHelperCleanup';
+    if (typeof window[CLEANUP_KEY] === 'function') {
+        try {
+            window[CLEANUP_KEY]();
+        } catch {
+            // Older helper instances should never block a fresh load.
+        }
+    }
+    const existing = document.getElementById('chiyo-helper-gui');
+    if (existing) existing.remove();
+    const INSTANCE_ID = `chiyo-helper-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const STATUS_ID = `${INSTANCE_ID}-status`;
+    const HELPER_VERSION = '1.0.13';
+
+    const DEFAULT_CONFIG = Object.freeze({
+        storageKey: 'chiyo-helper-config',
+        icons: Object.freeze({
+            bot: '',
+            auto: '',
+            upgrades: 'https://fishin-chiyo.vercel.app/assets/icons/tab-upgrades.png',
+            items: 'https://fishin-chiyo.vercel.app/assets/icons/tacklebox.png',
+            pets: 'https://fishin-chiyo.vercel.app/assets/icons/tab-pets.png',
+            webhook: ''
+        })
+    });
+
+    const parseJsonSafe = (raw) => {
+        if (!raw) return null;
+        try {
+            return JSON.parse(raw);
+        } catch {
+            return null;
+        }
+    };
+
+    const pickConfigIcons = (source) => {
+        if (!source || typeof source !== 'object' || typeof source.icons !== 'object') return {};
+        const icons = source.icons;
+        return {
+            bot: typeof icons.bot === 'string' ? icons.bot : undefined,
+            auto: typeof icons.auto === 'string' ? icons.auto : undefined,
+            upgrades: typeof icons.upgrades === 'string' ? icons.upgrades : undefined,
+            items: typeof icons.items === 'string' ? icons.items : undefined,
+            pets: typeof icons.pets === 'string' ? icons.pets : undefined,
+            webhook: typeof icons.webhook === 'string' ? icons.webhook : undefined
+        };
+    };
+
+    const storedConfig = parseJsonSafe(localStorage.getItem(DEFAULT_CONFIG.storageKey));
+    const globalConfig = (typeof window.CHIYO_HELPER_CONFIG === 'object' && window.CHIYO_HELPER_CONFIG) ? window.CHIYO_HELPER_CONFIG : null;
+    const config = {
+        ...DEFAULT_CONFIG,
+        icons: {
+            ...DEFAULT_CONFIG.icons,
+            ...pickConfigIcons(storedConfig),
+            ...pickConfigIcons(globalConfig)
+        }
+    };
+    const PROFILES_STORAGE_KEY = 'chiyo-helper-profiles-v1';
+    const ACTIVE_PROFILE_KEY = 'chiyo-helper-active-profile';
+    const AUTOLOAD_PROFILE_KEY = 'chiyo-helper-autoload-profile';
+    const AUTOSTART_BOT_KEY = 'chiyo-helper-auto-start-bot';
+    const GAME_WATCHDOG_KEY = 'chiyo-helper-game-watchdog';
+    const TOAST_WATCHDOG_KEY = 'chiyo-helper-toast-watchdog';
+
+    const fontLinkId = 'chiyo-helper-font';
+    if (!document.getElementById(fontLinkId)) {
+        const fontLink = document.createElement('link');
+        fontLink.id = fontLinkId;
+        fontLink.href = 'https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;700&display=swap';
+        fontLink.rel = 'stylesheet';
+        document.head.appendChild(fontLink);
+    }
+
+    let isRunning = false;
+    let isCleaning = false;
+    let autoRepair = true;
+    let autoClean = true;
+    let autoSell = true;
+    let autoUpgrades = true;
+    let autoZone = true;
+    let autoBoss = true;
+    let autoRebirth = true;
+    let pauseSpendingForZone = false;
+    let autoItems = false;
+    let autoItemUse = true;
+    let autoItemBuyMode = 'max';
+    let autoPets = false;
+    let autoPetClaim = true;
+    let autoPetUpgrades = true;
+    let autoPetEggs = true;
+    let autoPetEquip = false;
+    let rebirthNeedsWantedPets = false;
+    let rebirthWhileSavingZone = false;
+    let itemSegmentMode = 'TACKLE';
+    let upgradeBuyMode = 'buy';
+    let webhookEnabled = false;
+    let autoSellThreshold = 0;
+    let currentSpeed = 100;
+    let castInterval = null;
+    let automationInterval = null;
+    let cleanMenuRequested = false;
+    let cleanMenuRequestedAt = 0;
+    let nextUiActionAt = 0;
+    let nextZoneCheckAt = 0;
+    let nextRebirthCheckAt = 0;
+    let nextUpgradeCheckAt = 0;
+    let nextItemCheckAt = 0;
+    let nextPetCheckAt = 0;
+    let nextUpgradeActionAt = 0;
+    let nextItemActionAt = 0;
+    let nextPetUpgradeActionAt = 0;
+    let automationTaskIndex = 0;
+    let automationTaskStartedAt = 0;
+    let automationTaskHardStartedAt = 0;
+    let saveForZone = false;
+    let upgradesDropdownOpen = false;
+    let priorityDropdownOpen = false;
+    let priorityUpgradeNames = [];
+    let itemDropdownOpen = false;
+    let itemSearchQuery = '';
+    let petEggDropdownOpen = false;
+    let petWantedDropdownOpen = false;
+    let petEggSearchQuery = '';
+    let petWantedSearchQuery = '';
+    let desiredEggNames = [];
+    let desiredPetNames = [];
+    let petEggRotationIndex = 0;
+    let selectedProfileName = '';
+    let profileAutoLoadEnabled = false;
+    let pendingRunningState = null;
+    let applyPendingBotStart = null;
+    let isDisposed = false;
+    let renderFrameId = 0;
+    let serverBlockedInterval = null;
+    let gameWatchdogInterval = null;
+    let castMissingSince = 0;
+    let castProgressStalledSince = 0;
+    let autoStartBotEnabled = localStorage.getItem(AUTOSTART_BOT_KEY) === '1';
+    let gameWatchdogEnabled = localStorage.getItem(GAME_WATCHDOG_KEY) !== '0';
+    let toastWatchdogEnabled = localStorage.getItem(TOAST_WATCHDOG_KEY) === '1';
+    let blockedActionToastTimes = [];
+    let toastObserver = null;
+    let castWaitingForReady = false;
+    let castSawBusy = false;
+    let lastCastClickAt = 0;
+    let nextCastAttemptAt = 0;
+    let lastEggCollectAt = 0;
+    let lastEggCollectSignature = '';
+    const configProfiles = {};
+    const upgradePreferences = new Map();
+    const FALLBACK_UPGRADES = [
+        'Rod',
+        'Reel',
+        'Market Bell',
+        'Bait',
+        'Bobber',
+        'Hook',
+        'Reinforced Hook',
+        'Junk Filter',
+        'Tackle Brush',
+        'Repair Kit',
+        'Hookwright',
+        'Tackle Net',
+        'Weather Vane',
+        'Dock',
+        'Tackle Box',
+        'Crew'
+    ];
+    const FALLBACK_ITEMS = [
+        'Worm Tin',
+        'Shiny Spoon',
+        'Sturdy Float',
+        'Chum Bucket',
+        'Lucky Pearl',
+        'Storm Jar',
+        'Pocket Moon',
+        'Prism Chum',
+        'Bucket Sticker',
+        'Market Ticket',
+        'Jelly Lantern',
+        'Tiny Net',
+        'Lucky Polish'
+    ];
+    const FALLBACK_EGGS = [
+        'Speckled Egg',
+        'Driftwood Egg',
+        'Riverstone Egg',
+        'Reef Egg',
+        'Storm Egg',
+        'Glacier Egg',
+        'Abyss Egg',
+        'Garden Egg',
+        'Glass Egg',
+        'Ember Egg',
+        'Starfall Egg',
+        'Prestige Egg'
+    ];
+    const FALLBACK_PETS = [
+        'Minnow Pup',
+        'Pebble Crab',
+        'Lucky Duck',
+        'Echo Frog',
+        'Night Owl',
+        'Starlit Hedgehog',
+        'Drift Snail',
+        'Barkfin Pup',
+        'Amber Heron',
+        'Moss Mole',
+        'Hollow Fox',
+        'Root Wyrm',
+        'Ripple Otter',
+        'Koi Wisp',
+        'Runic Eel',
+        'River Moth',
+        'Silver Newt',
+        'Wish Axolotl',
+        'Coral Sprite',
+        'Bubble Turtle',
+        'Crown Starfish',
+        'Pearl Hare',
+        'Glimmer Nautilus',
+        'Tidal Muse',
+        'Cloud Ray',
+        'Spark Eel',
+        'Tempest Whelp',
+        'Thunder Moth',
+        'Sky Serpent',
+        'Tempest Crown',
+        'Snow Newt',
+        'Aurora Seal',
+        'Frost Wyrmling',
+        'Ice Lynx',
+        'Halo Penguin',
+        'Snowglobe Spirit',
+        'Lantern Imp',
+        'Voidling',
+        'Tiny Kraken',
+        'Abyss Moth',
+        'Null Jelly',
+        'Crown Leviathan',
+        'Seed Guppy',
+        'Orchid Moth',
+        'Eden Pup',
+        'Nectar Frog',
+        'Lotus Stag',
+        'Wish Bloom',
+        'Mirror Crab',
+        'Prism Fox',
+        'Chime Serpent',
+        'Lens Moth',
+        'Quartz Hare',
+        'Oracle Ray',
+        'Coal Newt',
+        'Ember Drake',
+        'Phoenix Fry',
+        'Cinder Moth',
+        'Magma Tortoise',
+        'Solar Salamander',
+        'Orbit Manta',
+        'Comet Cat',
+        'Wishling',
+        'Nova Moth',
+        'Eclipse Hare',
+        'Star Whale',
+        'Token Toad',
+        'Crown Sprite',
+        'Rebirth Whale',
+        'Gilded Minnow',
+        'Legacy Fox',
+        'Timekeeper Leviathan'
+    ];
+    let cachedUpgradeNames = [...FALLBACK_UPGRADES];
+    let managedItemNames = [];
+    let cachedItemNames = [...FALLBACK_ITEMS];
+    let itemActiveThreshold = 25000;
+    let cachedEggNames = [...FALLBACK_EGGS];
+    let cachedPetNames = [...FALLBACK_PETS];
+    let cachedEquippedPetNames = [];
+
+    const CLEAN_DELAYS = Object.freeze({ start: 0, h2: 0, h3: 0, h4: 0 });
+    const CLEAN_OPEN_RETRY_MS = 1500;
+    const ZONE_CHECK_INTERVAL_MS = 2000;
+    const REBIRTH_CHECK_INTERVAL_MS = 5000;
+    const UPGRADE_CHECK_INTERVAL_MS = 2500;
+    const ITEM_CHECK_INTERVAL_MS = 3000;
+    const PET_CHECK_INTERVAL_MS = 3000;
+    const TAB_OPEN_DELAY_MS = 650;
+    const ZONE_ACTION_DELAY_MS = 1800;
+    const UPGRADE_BUY_ACTION_DELAY_MS = 1500;
+    const ITEM_BUY_ACTION_DELAY_MS = 1500;
+    const ITEM_USE_ACTION_DELAY_MS = 1500;
+    const PET_UPGRADE_BUY_ACTION_DELAY_MS = 1500;
+    const EGG_COLLECT_REPEAT_GUARD_MS = 2500;
+    const AUTOMATION_LOOP_MS = 100;
+    const AUTOMATION_TAB_DWELL_MS = 10000;
+    const AUTOMATION_TAB_MAX_DWELL_MS = 30000;
+    const CAST_LOOP_INTERVAL_MS = 100;
+    const CAST_READY_FALLBACK_MS = 1500;
+    const CAST_LOCK_TIMEOUT_MS = 12000;
+    const SERVER_BLOCKED_RELOAD_MS = 15000;
+    const SERVER_BLOCKED_RELOAD_KEY = 'chiyo-helper-last-server-blocked-reload';
+    const GAME_WATCHDOG_CHECK_MS = 10000;
+    const GAME_WATCHDOG_MISSING_MS = 30000;
+    const GAME_WATCHDOG_RELOAD_KEY = 'chiyo-helper-last-watchdog-reload';
+    const TOAST_WATCHDOG_WINDOW_MS = 60000;
+    const TOAST_WATCHDOG_LIMIT = 10;
+    const TOAST_WATCHDOG_RELOAD_KEY = 'chiyo-helper-last-toast-watchdog-reload';
+    const AUTOMATION_TASKS = Object.freeze(['upgrades', 'items', 'pets', 'zone', 'rebirth']);
+
+    const styleId = 'chiyo-helper-styles';
+    if (!document.getElementById(styleId)) {
+        const style = document.createElement('style');
+        style.id = styleId;
+        style.textContent = `
+            #chiyo-helper-gui {
+                position: fixed;
+                top: 20px;
+                left: 20px;
+                z-index: 10000;
+                background: #f5ead0;
+                border: 4px solid #3a2515;
+                width: 320px;
+                min-width: 240px;
+                max-width: 520px;
+                min-height: 220px;
+                height: auto;
+                font-family: 'Pixelify Sans', monospace;
+                box-shadow: 5px 5px 0 #3a2515;
+                color: #3a2515;
+                padding: 0;
+                user-select: none;
+                display: flex;
+                flex-direction: column;
+                --fs: 13px;
+            }
+            .c-titlebar {
+                background: #3a2515;
+                color: #f5ead0;
+                padding: 7px 12px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                border-bottom: 3px solid #2a1a0d;
+                flex-shrink: 0;
+                cursor: move;
+            }
+            .c-eyebrow {
+                font-size: 9px;
+                color: #e8b547;
+                letter-spacing: 2px;
+                display: block;
+                line-height: 1;
+                margin-bottom: 2px;
+            }
+            .c-title-name {
+                font-size: calc(var(--fs) * 1.2);
+                font-weight: 700;
+                line-height: 1;
+            }
+            .c-title-version {
+                font-size: 9px;
+                color: #c9a870;
+                margin-left: 6px;
+                line-height: 1;
+            }
+            .c-close {
+                cursor: pointer;
+                font-size: 20px;
+                color: #c9a870;
+                line-height: 1;
+                padding: 2px 6px;
+            }
+            .c-window-actions {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+            }
+            .c-minimize {
+                cursor: pointer;
+                font-size: 18px;
+                color: #c9a870;
+                line-height: 1;
+                padding: 2px 6px;
+                border: 0;
+                background: transparent;
+                font-family: inherit;
+            }
+            .c-minimize:hover,
+            .c-close:hover { color: #f5ead0; }
+            .c-body {
+                display: flex;
+                flex: 1;
+                overflow: hidden;
+                min-height: 0;
+            }
+            .c-tabs {
+                width: 42px;
+                background: #2a1a0d;
+                display: flex;
+                flex-direction: column;
+                border-right: 3px solid #3a2515;
+                flex-shrink: 0;
+                padding-top: 4px;
+            }
+            .c-tab {
+                width: 42px;
+                height: 42px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                border: none;
+                background: transparent;
+                border-left: 3px solid transparent;
+                position: relative;
+            }
+            .c-tab:hover { background: rgba(245, 234, 208, 0.07); }
+            .c-tab.on {
+                background: rgba(232, 181, 71, 0.12);
+                border-left-color: #e8b547;
+            }
+            .c-tab-icon {
+                width: 24px;
+                height: 24px;
+                object-fit: contain;
+                image-rendering: pixelated;
+                pointer-events: none;
+                display: block;
+            }
+            .c-tooltip {
+                display: none;
+                position: absolute;
+                left: 48px;
+                top: 50%;
+                transform: translateY(-50%);
+                background: #3a2515;
+                color: #f5ead0;
+                padding: 3px 8px;
+                font-family: 'Pixelify Sans', monospace;
+                font-size: 11px;
+                white-space: nowrap;
+                z-index: 999;
+                box-shadow: 2px 2px 0 #2a1a0d;
+                pointer-events: none;
+            }
+            .c-tab:hover .c-tooltip { display: block; }
+            .c-panel {
+                display: none;
+                flex: 1;
+                overflow-y: auto;
+                padding: 13px;
+                font-size: var(--fs);
+            }
+            .c-panel.on { display: block; }
+            .c-panel::-webkit-scrollbar { width: 5px; }
+            .c-panel::-webkit-scrollbar-track { background: #e8d4b0; }
+            .c-panel::-webkit-scrollbar-thumb { background: #3a2515; }
+            .c-btn {
+                width: 100%;
+                padding: 9px;
+                border: 3px solid #3a2515;
+                background: #e8b547;
+                font-weight: 700;
+                cursor: pointer;
+                margin-bottom: 13px;
+                font-family: inherit;
+                font-size: calc(var(--fs) * 1.1);
+                box-shadow: 4px 4px 0 #3a2515;
+                color: #3a2515;
+                letter-spacing: 1px;
+            }
+            .c-btn:active {
+                transform: translate(2px, 2px);
+                box-shadow: 2px 2px 0 #3a2515;
+            }
+            .c-btn.on {
+                background: #c94b4b;
+                color: #f5ead0;
+                border-color: #2a1a0d;
+            }
+            .c-row {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 9px;
+                font-size: var(--fs);
+                gap: 10px;
+            }
+            .c-cb-wrap {
+                display: flex;
+                align-items: center;
+                cursor: pointer;
+                font-size: var(--fs);
+                font-weight: 700;
+                margin-bottom: 7px;
+            }
+            .c-cb { display: none; }
+            .c-box {
+                width: 18px;
+                height: 18px;
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                margin-right: 9px;
+                box-shadow: 2px 2px 0 #3a2515;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex-shrink: 0;
+            }
+            .c-cb:checked + .c-box { background: #6fb07f; }
+            .c-cb:checked + .c-box::after {
+                content: 'X';
+                font-size: 11px;
+                color: #3a2515;
+                font-weight: 700;
+                line-height: 1;
+            }
+            #sell-chk:checked + .c-box { background: #e8b547; }
+            #auto-start-chk:checked + .c-box,
+            #watchdog-chk:checked + .c-box,
+            #toast-watchdog-chk:checked + .c-box,
+            #upgrade-chk:checked + .c-box,
+            #zone-chk:checked + .c-box,
+            #zone-save-pause-chk:checked + .c-box,
+            #boss-chk:checked + .c-box,
+            #rebirth-chk:checked + .c-box,
+            #rebirth-pets-ready-chk:checked + .c-box,
+            #rebirth-save-zone-chk:checked + .c-box,
+            #item-chk:checked + .c-box,
+            #pet-chk:checked + .c-box,
+            #pet-claim-chk:checked + .c-box,
+            #pet-upgrades-chk:checked + .c-box,
+            #pet-eggs-chk:checked + .c-box,
+            #pet-equip-chk:checked + .c-box { background: #5b8dd6; }
+            .c-div {
+                height: 2px;
+                background: #3a2515;
+                margin: 10px 0;
+                opacity: 0.18;
+            }
+            .c-eyebrow-label {
+                font-size: calc(var(--fs) * 0.78);
+                letter-spacing: 2px;
+                color: #9b7250;
+                margin-bottom: 5px;
+            }
+            .c-status {
+                background: #fdf6e3;
+                border: 3px solid #3a2515;
+                padding: 3px 9px;
+                font-size: var(--fs);
+                display: flex;
+                align-items: center;
+                box-shadow: 3px 3px 0 #3a2515;
+                min-width: 128px;
+                justify-content: flex-start;
+            }
+            .dot {
+                width: 8px;
+                height: 8px;
+                background: #aaa;
+                border: 2px solid #3a2515;
+                margin-right: 6px;
+                flex-shrink: 0;
+            }
+            .dot.on {
+                background: #6fb07f;
+                animation: pp 0.8s steps(2) infinite;
+            }
+            .dot.sell {
+                background: #e8b547;
+                animation: pp 0.6s steps(2) infinite;
+            }
+            .dot.auto {
+                background: #5b8dd6;
+                animation: pp 0.8s steps(2) infinite;
+            }
+            @keyframes pp {
+                0% { opacity: 1; }
+                50% { opacity: 0; }
+                100% { opacity: 1; }
+            }
+            input[type="range"] {
+                width: 100%;
+                height: 7px;
+                background: #3a2515;
+                outline: none;
+                appearance: none;
+                margin-top: 4px;
+                display: block;
+            }
+            input[type="range"]::-webkit-slider-thumb {
+                appearance: none;
+                width: 15px;
+                height: 15px;
+                background: #e8b547;
+                border: 3px solid #3a2515;
+                cursor: pointer;
+                box-shadow: 2px 2px 0 #3a2515;
+            }
+            .c-card {
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                box-shadow: 3px 3px 0 #3a2515;
+                padding: 10px;
+                margin-bottom: 10px;
+            }
+            .c-card.compact { padding: 8px; }
+            .c-note {
+                font-size: calc(var(--fs) * 0.82);
+                line-height: 1.35;
+                color: #6b4a2f;
+            }
+            .c-subnote {
+                font-size: calc(var(--fs) * 0.74);
+                line-height: 1.3;
+                color: #8b6240;
+            }
+            .c-toolbar {
+                display: flex;
+                gap: 6px;
+                margin-bottom: 10px;
+            }
+            .c-toolbar.compact {
+                margin-bottom: 8px;
+            }
+            .c-mini-btn {
+                flex: 1;
+                padding: 6px 8px;
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                color: #3a2515;
+                font-family: inherit;
+                font-size: calc(var(--fs) * 0.8);
+                font-weight: 700;
+                cursor: pointer;
+                box-shadow: 2px 2px 0 #3a2515;
+            }
+            .c-mini-btn.on {
+                background: #5b8dd6;
+                color: #f5ead0;
+            }
+            .c-mini-btn:active {
+                transform: translate(1px, 1px);
+                box-shadow: 1px 1px 0 #3a2515;
+            }
+            .c-list {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .c-empty {
+                border: 3px dashed #9b7250;
+                padding: 10px;
+                background: rgba(253, 246, 227, 0.7);
+                color: #8b6240;
+                font-size: calc(var(--fs) * 0.8);
+            }
+            .c-dropdown {
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                box-shadow: 3px 3px 0 #3a2515;
+                overflow: hidden;
+            }
+            .c-dropdown-btn {
+                width: 100%;
+                border: 0;
+                background: transparent;
+                color: #3a2515;
+                font-family: inherit;
+                cursor: pointer;
+                padding: 10px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                text-align: left;
+            }
+            .c-dropdown-btn strong {
+                font-size: calc(var(--fs) * 0.82);
+                color: #5b8dd6;
+            }
+            .c-dropdown-btn span {
+                font-weight: 700;
+                letter-spacing: 1px;
+            }
+            .c-dropdown-arrow {
+                color: #9b7250;
+                font-size: calc(var(--fs) * 0.85);
+                margin-left: 6px;
+            }
+            .c-dropdown-panel {
+                display: none;
+                border-top: 3px solid #3a2515;
+                padding: 10px;
+                background: rgba(232, 212, 176, 0.35);
+            }
+            .c-dropdown.open .c-dropdown-panel {
+                display: block;
+            }
+            .c-dropdown-list {
+                max-height: 270px;
+                overflow-y: auto;
+                padding-right: 2px;
+            }
+            .c-dropdown-list::-webkit-scrollbar {
+                width: 5px;
+            }
+            .c-dropdown-list::-webkit-scrollbar-track {
+                background: #e8d4b0;
+            }
+            .c-dropdown-list::-webkit-scrollbar-thumb {
+                background: #3a2515;
+            }
+            .c-priority-option {
+                width: 100%;
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                color: #3a2515;
+                font-family: inherit;
+                font-size: calc(var(--fs) * 0.8);
+                font-weight: 700;
+                text-align: left;
+                padding: 8px 10px;
+                cursor: pointer;
+                box-shadow: 2px 2px 0 #3a2515;
+                margin-bottom: 6px;
+            }
+            .c-priority-option:last-child {
+                margin-bottom: 0;
+            }
+            .c-priority-option.on {
+                background: #5b8dd6;
+                color: #f5ead0;
+            }
+            .c-priority-option:active {
+                transform: translate(1px, 1px);
+                box-shadow: 1px 1px 0 #3a2515;
+            }
+            .c-priority-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+            }
+            .c-priority-meta {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                min-width: 0;
+            }
+            .c-priority-badge {
+                min-width: 34px;
+                height: 24px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                border: 3px solid #3a2515;
+                background: #e8d4b0;
+                box-shadow: 2px 2px 0 #3a2515;
+                font-size: calc(var(--fs) * 0.74);
+                font-weight: 700;
+                flex-shrink: 0;
+            }
+            .c-priority-badge.on {
+                background: #5b8dd6;
+                color: #f5ead0;
+            }
+            .c-priority-name {
+                font-size: calc(var(--fs) * 0.82);
+                font-weight: 700;
+                color: #3a2515;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .c-priority-actions {
+                display: flex;
+                gap: 4px;
+                flex-shrink: 0;
+            }
+            .c-priority-btn {
+                min-width: 34px;
+                padding: 5px 6px;
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                color: #3a2515;
+                font-family: inherit;
+                font-size: calc(var(--fs) * 0.72);
+                font-weight: 700;
+                cursor: pointer;
+                box-shadow: 2px 2px 0 #3a2515;
+            }
+            .c-priority-btn:active {
+                transform: translate(1px, 1px);
+                box-shadow: 1px 1px 0 #3a2515;
+            }
+            .c-priority-btn.add {
+                background: #6fb07f;
+            }
+            .c-priority-btn.remove {
+                background: #c94b4b;
+                color: #f5ead0;
+            }
+            .c-discord-head {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 11px;
+            }
+            .c-discord-name {
+                font-size: calc(var(--fs) * 1.1);
+                font-weight: 700;
+                color: #5865f2;
+            }
+            .c-discord-sub {
+                font-size: calc(var(--fs) * 0.8);
+                color: #9b7250;
+                margin-top: 1px;
+            }
+            .c-input {
+                width: 100%;
+                box-sizing: border-box;
+                padding: 6px 8px;
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                font-family: 'Pixelify Sans', monospace;
+                font-size: calc(var(--fs) * 0.82);
+                color: #3a2515;
+                box-shadow: 3px 3px 0 #3a2515;
+                outline: none;
+                margin-top: 4px;
+                display: block;
+            }
+            .c-input:focus { border-color: #5865f2; }
+            .c-input::placeholder { color: #b8a080; }
+            .c-filter-input {
+                margin: 8px 0;
+            }
+            .c-notify-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 4px;
+                margin-top: 6px;
+            }
+            .r-rare { color: #29968e; }
+            .r-epic { color: #9b6dff; }
+            .r-legendary { color: #c9860a; }
+            .r-mythic { color: #c94b4b; }
+            .c-wh-btn {
+                width: 100%;
+                padding: 8px;
+                border: 3px solid #5865f2;
+                background: #5865f2;
+                font-weight: 700;
+                cursor: pointer;
+                font-family: inherit;
+                font-size: var(--fs);
+                box-shadow: 3px 3px 0 #3a2515;
+                color: #fff;
+                letter-spacing: 1px;
+                margin-top: 10px;
+            }
+            .c-wh-btn:active {
+                transform: translate(2px, 2px);
+                box-shadow: 1px 1px 0 #3a2515;
+            }
+            .c-wh-status {
+                font-size: calc(var(--fs) * 0.8);
+                padding: 4px 8px;
+                margin-top: 7px;
+                border: 2px solid;
+                display: none;
+            }
+            .c-wh-status.ok {
+                border-color: #6fb07f;
+                color: #6fb07f;
+                background: rgba(111, 176, 127, 0.1);
+            }
+            .c-wh-status.err {
+                border-color: #c94b4b;
+                color: #c94b4b;
+                background: rgba(201, 75, 75, 0.1);
+            }
+            .c-config-row {
+                display: flex;
+                gap: 6px;
+                margin-top: 8px;
+            }
+            .c-config-row .c-mini-btn {
+                margin: 0;
+            }
+            .c-select {
+                width: 100%;
+                box-sizing: border-box;
+                padding: 6px 8px;
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                font-family: 'Pixelify Sans', monospace;
+                font-size: calc(var(--fs) * 0.82);
+                color: #3a2515;
+                box-shadow: 3px 3px 0 #3a2515;
+                outline: none;
+                display: block;
+                appearance: none;
+            }
+            .c-textarea {
+                min-height: 72px;
+                resize: vertical;
+            }
+            .c-num-input {
+                width: 88px;
+                box-sizing: border-box;
+                padding: 5px 6px;
+                border: 3px solid #3a2515;
+                background: #fdf6e3;
+                color: #3a2515;
+                font-family: 'Pixelify Sans', monospace;
+                font-size: calc(var(--fs) * 0.8);
+                box-shadow: 2px 2px 0 #3a2515;
+                outline: none;
+                text-align: right;
+            }
+            .c-num-input:focus {
+                border-color: #5b8dd6;
+            }
+            .c-inline-note {
+                font-size: calc(var(--fs) * 0.74);
+                color: #8b6240;
+                margin-bottom: 10px;
+            }
+            .c-cfg-status {
+                font-size: calc(var(--fs) * 0.8);
+                padding: 4px 8px;
+                margin-top: 7px;
+                border: 2px solid #3a2515;
+                color: #3a2515;
+                background: rgba(58, 37, 21, 0.06);
+                display: none;
+            }
+            .c-grip {
+                position: absolute;
+                bottom: 3px;
+                right: 3px;
+                width: 16px;
+                height: 16px;
+                cursor: nwse-resize;
+                display: grid;
+                grid-template-columns: repeat(3, 4px);
+                gap: 2px;
+                opacity: 0.35;
+                transition: opacity 0.15s;
+            }
+            .c-grip:hover { opacity: 1; }
+            .c-dot {
+                width: 4px;
+                height: 4px;
+                background: #3a2515;
+            }
+            .c-dot:nth-child(-n+3) { background: transparent; }
+            .c-dot:nth-child(4) { background: transparent; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    const rodSvg = `<svg width="24" height="24" viewBox="0 0 12 12" shape-rendering="crispEdges"><rect x="1" y="0" width="1" height="8" fill="#c9a870"></rect><rect x="2" y="1" width="1" height="6" fill="#c9a870"></rect><rect x="3" y="2" width="1" height="4" fill="#c9a870"></rect><rect x="4" y="3" width="1" height="3" fill="#c9a870"></rect><rect x="5" y="5" width="1" height="5" fill="#c9a870" opacity="0.6"></rect><rect x="4" y="9" width="3" height="1" fill="#c94b4b"></rect><rect x="4" y="10" width="3" height="1" fill="#e8b547"></rect></svg>`;
+    const autoSvg = `<svg width="24" height="24" viewBox="0 0 12 12" shape-rendering="crispEdges"><rect x="1" y="2" width="10" height="8" fill="#5b8dd6"></rect><rect x="2" y="3" width="8" height="6" fill="#fdf6e3"></rect><rect x="3" y="4" width="2" height="2" fill="#5b8dd6"></rect><rect x="7" y="4" width="2" height="2" fill="#5b8dd6"></rect><rect x="4" y="7" width="4" height="1" fill="#3a2515"></rect><rect x="5" y="0" width="2" height="2" fill="#e8b547"></rect></svg>`;
+    const upgradesSvg = `<svg width="24" height="24" viewBox="0 0 12 12" shape-rendering="crispEdges"><rect x="1" y="5" width="10" height="2" fill="#e8b547"></rect><rect x="5" y="1" width="2" height="10" fill="#e8b547"></rect><rect x="3" y="3" width="2" height="2" fill="#3a2515"></rect><rect x="7" y="7" width="2" height="2" fill="#3a2515"></rect></svg>`;
+    const itemsSvg = `<svg width="24" height="24" viewBox="0 0 12 12" shape-rendering="crispEdges"><rect x="1" y="3" width="10" height="8" fill="#c94b4b"></rect><rect x="1" y="3" width="10" height="1" fill="#e07070"></rect><rect x="1" y="9" width="10" height="1" fill="#8a2b2b"></rect><rect x="4" y="2" width="4" height="1" fill="#5a3a1f"></rect><rect x="4" y="6" width="4" height="1" fill="#e8b547"></rect><rect x="5" y="6" width="2" height="1" fill="#ffd060"></rect></svg>`;
+    const petsSvg = `<svg width="24" height="24" viewBox="0 0 12 12" shape-rendering="crispEdges"><rect x="2" y="2" width="2" height="2" fill="#c9a870"></rect><rect x="8" y="2" width="2" height="2" fill="#c9a870"></rect><rect x="1" y="4" width="10" height="6" fill="#fdf6e3"></rect><rect x="4" y="6" width="1" height="1" fill="#3a2515"></rect><rect x="7" y="6" width="1" height="1" fill="#3a2515"></rect><rect x="5" y="8" width="2" height="1" fill="#c94b4b"></rect></svg>`;
+    const discordSvg = `<svg width="26" height="20" viewBox="0 0 13 10" shape-rendering="crispEdges"><rect x="2" y="1" width="9" height="7" fill="#5865F2"></rect><rect x="1" y="2" width="1" height="5" fill="#5865F2"></rect><rect x="11" y="2" width="1" height="5" fill="#5865F2"></rect><rect x="3" y="0" width="2" height="1" fill="#5865F2"></rect><rect x="8" y="0" width="2" height="1" fill="#5865F2"></rect><rect x="3" y="8" width="2" height="1" fill="#5865F2"></rect><rect x="8" y="8" width="2" height="1" fill="#5865F2"></rect><rect x="2" y="9" width="3" height="1" fill="#5865F2"></rect><rect x="8" y="9" width="3" height="1" fill="#5865F2"></rect><rect x="3" y="3" width="2" height="2" fill="#fdf6e3"></rect><rect x="8" y="3" width="2" height="2" fill="#fdf6e3"></rect><rect x="4" y="4" width="1" height="1" fill="#5865F2"></rect><rect x="9" y="4" width="1" height="1" fill="#5865F2"></rect></svg>`;
+    const configSvg = `<svg width="24" height="24" viewBox="0 0 12 12" shape-rendering="crispEdges"><rect x="2" y="1" width="7" height="10" fill="#fdf6e3"></rect><rect x="2" y="1" width="7" height="1" fill="#e8d4b0"></rect><rect x="8" y="1" width="1" height="3" fill="#c9a870"></rect><rect x="3" y="4" width="5" height="1" fill="#3a2515"></rect><rect x="3" y="6" width="5" height="1" fill="#3a2515"></rect><rect x="3" y="8" width="3" height="1" fill="#3a2515"></rect><rect x="1" y="2" width="1" height="8" fill="#3a2515"></rect><rect x="9" y="2" width="1" height="8" fill="#3a2515"></rect></svg>`;
+    const escapeAttr = (value) => String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    const tabIconMarkup = (url, fallbackSvg, alt) => {
+        if (typeof url === 'string' && url.trim()) {
+            return `<img class="c-tab-icon" src="${escapeAttr(url.trim())}" alt="${escapeAttr(alt)}">`;
+        }
+        return fallbackSvg;
+    };
+    const botTabIcon = tabIconMarkup(config.icons.bot, rodSvg, 'Bot');
+    const autoTabIcon = tabIconMarkup(config.icons.auto, autoSvg, 'Auto');
+    const upgradesTabIcon = tabIconMarkup(config.icons.upgrades, upgradesSvg, 'Upgrades');
+    const itemsTabIcon = tabIconMarkup(config.icons.items, itemsSvg, 'Items');
+    const petsTabIcon = tabIconMarkup(config.icons.pets, petsSvg, 'Pets');
+    const webhookTabIcon = tabIconMarkup(config.icons.webhook, discordSvg, 'Webhook');
+    const configTabIcon = configSvg;
+
+    const gui = document.createElement('div');
+    gui.id = 'chiyo-helper-gui';
+    gui.innerHTML = `
+        <div class="c-titlebar">
+            <div>
+                <span class="c-eyebrow">AUTO HELPER</span>
+                <span class="c-title-name">CHIYO ULTRA</span><span class="c-title-version">v${HELPER_VERSION}</span>
+            </div>
+            <div class="c-window-actions">
+                <button class="c-minimize" id="c-minimize" type="button" aria-label="Minimize">-</button>
+                <span class="c-close" id="c-close">x</span>
+            </div>
+        </div>
+        <div class="c-body">
+            <div class="c-tabs">
+                <button class="c-tab on" data-tab="bot">${botTabIcon}<span class="c-tooltip">BOT</span></button>
+                <button class="c-tab" data-tab="auto">${autoTabIcon}<span class="c-tooltip">AUTO</span></button>
+                <button class="c-tab" data-tab="upgrades">${upgradesTabIcon}<span class="c-tooltip">UPGRADES</span></button>
+                <button class="c-tab" data-tab="items">${itemsTabIcon}<span class="c-tooltip">ITEMS</span></button>
+                <button class="c-tab" data-tab="pets">${petsTabIcon}<span class="c-tooltip">PETS</span></button>
+                <button class="c-tab" data-tab="webhook">${webhookTabIcon}<span class="c-tooltip">WEBHOOK</span></button>
+                <button class="c-tab" data-tab="config">${configTabIcon}<span class="c-tooltip">CONFIG</span></button>
+            </div>
+            <div class="c-panel on" id="panel-bot">
+                <button id="toggle-bot" class="c-btn">START FISHIN'</button>
+                <div class="c-row">
+                    <span>STATUS</span>
+                    <div class="c-status" id="${STATUS_ID}"><div class="dot"></div>IDLE</div>
+                </div>
+                <div class="c-div"></div>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="auto-start-chk"><span class="c-box"></span> AUTO-START BOT ON LOAD</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="watchdog-chk" checked><span class="c-box"></span> AUTO-REFRESH IF GAME MISSING</label>
+                <div class="c-subnote">Checks every 10s. Refreshes after 30s with no cast button or no reeling state.</div>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="toast-watchdog-chk"><span class="c-box"></span> AUTO-REFRESH ON ACTION BLOCKED</label>
+                <div class="c-subnote">Refreshes after 10 blocked-action warnings within 1 minute.</div>
+                <div class="c-div"></div>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="repair-chk" checked><span class="c-box"></span> AUTO-REPAIR</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="clean-chk" checked><span class="c-box"></span> AUTO-CLEAN</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="sell-chk" checked><span class="c-box"></span> AUTO-SELL</label>
+                <div class="c-row" style="margin-bottom:4px;">
+                    <span>SELL AT</span>
+                    <input class="c-num-input" id="sell-threshold" type="number" min="0" step="1" value="0" title="0 means sell only when backpack is full">
+                </div>
+                <div class="c-inline-note" id="sell-threshold-note">0 = sell only when full</div>
+                <div class="c-div"></div>
+                <div class="c-eyebrow-label">CAST DELAY</div>
+                <div style="margin-bottom:11px;">
+                    <div style="display:flex;justify-content:space-between;"><span>DELAY</span><span id="delay-val">0.1s</span></div>
+                    <input type="range" id="delay-slide" min="100" max="5000" step="50" value="100">
+                </div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">CLEANING</div>
+                    <div class="c-note">Clean timing is hardcoded to 0, 0, 0, 0 and the menu opener is single-fire so it will not keep spamming CLEAN HOOK.</div>
+                </div>
+            </div>
+            <div class="c-panel" id="panel-upgrades">
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="upgrade-chk" checked><span class="c-box"></span> AUTO-UPGRADES</label>
+                <div class="c-eyebrow-label">BUY MODE</div>
+                <select class="c-select" id="upgrade-buy-mode" style="margin-bottom:8px;">
+                    <option value="buy">BUY 1</option>
+                    <option value="max">BUY MAX</option>
+                </select>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">FILTERS</div>
+                    <div class="c-subnote">Only enabled upgrades in this list can be auto-bought. If the game Upgrade page is open, this list syncs from the live cards.</div>
+                </div>
+                <div class="c-dropdown" id="priority-dropdown" style="margin-bottom:10px;">
+                    <button class="c-dropdown-btn" id="priority-dropdown-toggle" type="button">
+                        <span>UPGRADE PRIORITY <i class="c-dropdown-arrow" id="priority-dropdown-arrow">v</i></span>
+                        <strong id="priority-dropdown-value">DEFAULT</strong>
+                    </button>
+                    <div class="c-dropdown-panel">
+                        <div class="c-subnote" style="margin-bottom:8px;">When more than one enabled upgrade is affordable, the helper will try this one first.</div>
+                        <div class="c-dropdown-list">
+                            <div class="c-list" id="upgrade-priority-list"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="c-dropdown" id="upgrade-dropdown">
+                    <button class="c-dropdown-btn" id="upgrade-dropdown-toggle" type="button">
+                        <span>UPGRADE FILTERS <i class="c-dropdown-arrow" id="upgrade-dropdown-arrow">v</i></span>
+                        <strong id="upgrade-dropdown-count">0 ON</strong>
+                    </button>
+                    <div class="c-dropdown-panel">
+                        <div class="c-toolbar compact">
+                            <button class="c-mini-btn" id="upgrades-all-on" type="button">ALL ON</button>
+                            <button class="c-mini-btn" id="upgrades-all-off" type="button">ALL OFF</button>
+                            <button class="c-mini-btn" id="upgrades-refresh" type="button">REFRESH</button>
+                        </div>
+                        <div class="c-dropdown-list">
+                            <div class="c-list" id="upgrade-toggle-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="c-panel" id="panel-items">
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="item-chk"><span class="c-box"></span> AUTO-ITEMS</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="item-use-chk" checked><span class="c-box"></span> AUTO-USE OWNED ITEMS</label>
+                <div class="c-div"></div>
+                <div class="c-eyebrow-label">SEGMENT</div>
+                <select class="c-select" id="item-segment" style="margin-bottom:8px;">
+                    <option value="TACKLE">TACKLE</option>
+                    <option value="ENCHANT">ENCHANT</option>
+                    <option value="KITCHEN">KITCHEN</option>
+                </select>
+                <div class="c-div"></div>
+                <div class="c-eyebrow-label">BUY MODE</div>
+                <div class="c-toolbar compact">
+                    <button class="c-mini-btn" id="item-buy-one" type="button">BUY 1</button>
+                    <button class="c-mini-btn on" id="item-buy-max" type="button">BUY MAX</button>
+                </div>
+                <div class="c-div"></div>
+                <div class="c-eyebrow-label">MANAGED ITEMS</div>
+                <div class="c-dropdown" id="item-dropdown">
+                    <button class="c-dropdown-btn" id="item-dropdown-toggle" type="button">
+                        <span>ITEM FILTERS <i class="c-dropdown-arrow" id="item-dropdown-arrow">v</i></span>
+                        <strong id="item-dropdown-count">ALL</strong>
+                    </button>
+                    <div class="c-dropdown-panel">
+                        <div class="c-toolbar compact">
+                            <button class="c-mini-btn" id="items-all-on" type="button">ALL ON</button>
+                            <button class="c-mini-btn" id="items-clear" type="button">CLEAR</button>
+                        </div>
+                        <input class="c-input c-filter-input" id="item-search" type="search" placeholder="Search items...">
+                        <div class="c-dropdown-list">
+                            <div class="c-list" id="item-choice-list"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="c-inline-note">Empty selection means all items in the selected segment.</div>
+                <div class="c-eyebrow-label" style="margin-top:8px;">ACTIVE THRESHOLD</div>
+                <div class="c-row" style="margin-bottom:4px;">
+                    <span>MAX ACTIVE</span>
+                    <input class="c-num-input" id="item-active-threshold" type="number" min="0" step="1000" value="25000">
+                </div>
+                <div class="c-inline-note">Stop buying/using when Active: X left &ge; this value. 0 = no limit.</div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">LOGIC</div>
+                    <div class="c-note">Buys from the in-game Items tab when buttons are enabled. Use behavior: owned 1-99 uses one, owned 100+ uses USE ALL.</div>
+                    <div class="c-subnote">Item buying pauses while saving for zone, but using owned items can still run.</div>
+                </div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">STATUS</div>
+                    <div class="c-note" id="item-mode-label">Mode: BUY MAX</div>
+                    <div class="c-subnote" id="item-status-label">Waiting for Items tab data</div>
+                </div>
+            </div>
+            <div class="c-panel" id="panel-pets">
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="pet-chk"><span class="c-box"></span> AUTO-PETS/HATCH</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="pet-claim-chk" checked><span class="c-box"></span> AUTO-COLLECT READY EGGS</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="pet-upgrades-chk" checked><span class="c-box"></span> AUTO-PET UPGRADES</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="pet-eggs-chk" checked><span class="c-box"></span> AUTO-BUY / HATCH EGGS</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="pet-equip-chk"><span class="c-box"></span> AUTO-EQUIP WANTED PETS</label>
+                <div class="c-div"></div>
+                <div class="c-eyebrow-label">EGG ROTATION</div>
+                <div class="c-dropdown" id="pet-egg-dropdown" style="margin-bottom:8px;">
+                    <button class="c-dropdown-btn" id="pet-egg-dropdown-toggle" type="button">
+                        <span>EGG FILTERS <i class="c-dropdown-arrow" id="pet-egg-dropdown-arrow">v</i></span>
+                        <strong id="pet-egg-dropdown-count">ALL</strong>
+                    </button>
+                    <div class="c-dropdown-panel">
+                        <div class="c-toolbar compact">
+                            <button class="c-mini-btn" id="pet-eggs-all-on" type="button">ALL ON</button>
+                            <button class="c-mini-btn" id="pet-eggs-all-off" type="button">ALL OFF</button>
+                        </div>
+                        <input class="c-input c-filter-input" id="pet-egg-search" type="search" placeholder="Search eggs...">
+                        <div class="c-dropdown-list">
+                            <div class="c-list" id="pet-egg-choice-list"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="c-inline-note">Open the in-game Pets tab once to sync eggs. Empty selection means rotate all visible eggs.</div>
+                <div class="c-eyebrow-label">WANTED PETS</div>
+                <div class="c-dropdown" id="pet-wanted-dropdown">
+                    <button class="c-dropdown-btn" id="pet-wanted-dropdown-toggle" type="button">
+                        <span>PET FILTERS <i class="c-dropdown-arrow" id="pet-wanted-dropdown-arrow">v</i></span>
+                        <strong id="pet-wanted-dropdown-count">NONE</strong>
+                    </button>
+                    <div class="c-dropdown-panel">
+                        <div class="c-toolbar compact">
+                            <button class="c-mini-btn" id="pet-wanted-all-on" type="button">ALL ON</button>
+                            <button class="c-mini-btn" id="pet-wanted-all-off" type="button">ALL OFF</button>
+                        </div>
+                        <input class="c-input c-filter-input" id="pet-wanted-search" type="search" placeholder="Search pets...">
+                        <div class="c-dropdown-list">
+                            <div class="c-list" id="pet-wanted-choice-list"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="c-inline-note">Open the in-game Pets tab once to sync owned pets. Auto-equip fills open companion slots and can replace pets not selected here.</div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">ORDER</div>
+                    <div class="c-note">Collects ready eggs first, buys pet upgrades, equips wanted pets, then rotates egg buys/hatches.</div>
+                </div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">STATUS</div>
+                    <div class="c-subnote" id="pet-status-label">Waiting for Pets tab data</div>
+                </div>
+            </div>
+            <div class="c-panel" id="panel-auto">
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="zone-chk" checked><span class="c-box"></span> AUTO-ZONE</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="zone-save-pause-chk"><span class="c-box"></span> PAUSE SPENDING FOR ZONE</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="boss-chk" checked><span class="c-box"></span> AUTO-BOSS</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="rebirth-chk" checked><span class="c-box"></span> AUTO-REBIRTH</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="rebirth-pets-ready-chk"><span class="c-box"></span> ONLY REBIRTH WITH WANTED PETS EQUIPPED</label>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="rebirth-save-zone-chk"><span class="c-box"></span> CHECK REBIRTH WHILE SAVING FOR ZONE</label>
+                <div class="c-div"></div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">ZONE TRACKER</div>
+                    <div class="c-note" id="zone-current-label">Current: --</div>
+                    <div class="c-note" id="zone-next-label">Next: --</div>
+                    <div class="c-subnote" id="zone-best-label">Status: waiting for Waters tab</div>
+                </div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">ZONE</div>
+                    <div class="c-note">Checks Waters, saves for the fee after Fishdex is complete, and presses CHARTER AND SAIL when ready.</div>
+                </div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">BOSS / REBIRTH</div>
+                    <div class="c-note">Boss auto-clicks the moving boss target. Rebirth checks the Rebirth tab and clicks the rebirth button when it is enabled.</div>
+                </div>
+            </div>
+            <div class="c-panel" id="panel-webhook">
+                <div class="c-discord-head">
+                    ${discordSvg}
+                    <div>
+                        <div class="c-discord-name">DISCORD</div>
+                        <div class="c-discord-sub">Webhook Alerts + Fish Art</div>
+                    </div>
+                </div>
+                <label class="c-cb-wrap"><input type="checkbox" class="c-cb" id="webhook-enabled"><span class="c-box"></span> ENABLE WEBHOOK</label>
+                <div class="c-div"></div>
+                <div class="c-eyebrow-label">WEBHOOK URL</div>
+                <input class="c-input" id="webhook-url" type="text" placeholder="discord.com/api/webhooks/...">
+                <div class="c-div"></div>
+                <div class="c-eyebrow-label">NOTIFY ON</div>
+                <div class="c-notify-grid">
+                    <label class="c-cb-wrap" style="margin-bottom:0;"><input type="checkbox" class="c-cb" id="notify-rare"><span class="c-box"></span><span class="r-rare">Rare</span></label>
+                    <label class="c-cb-wrap" style="margin-bottom:0;"><input type="checkbox" class="c-cb" id="notify-epic"><span class="c-box"></span><span class="r-epic">Epic</span></label>
+                    <label class="c-cb-wrap" style="margin-bottom:0;margin-top:6px;"><input type="checkbox" class="c-cb" id="notify-legendary" checked><span class="c-box"></span><span class="r-legendary">Legendary</span></label>
+                    <label class="c-cb-wrap" style="margin-bottom:0;margin-top:6px;"><input type="checkbox" class="c-cb" id="notify-mythic" checked><span class="c-box"></span><span class="r-mythic">Mythic</span></label>
+                </div>
+                <div class="c-div"></div>
+                <button class="c-wh-btn" id="test-wh-btn">TEST WEBHOOK</button>
+                <div class="c-wh-status" id="wh-status"></div>
+            </div>
+            <div class="c-panel" id="panel-config">
+                <div class="c-card">
+                    <div class="c-eyebrow-label">PROFILE</div>
+                    <div class="c-subnote">Save and load your helper setup.</div>
+                    <div style="margin-top:8px;">
+                        <select class="c-select" id="cfg-select"></select>
+                    </div>
+                    <label class="c-cb-wrap" style="margin-top:8px;"><input type="checkbox" class="c-cb" id="cfg-autoload"><span class="c-box"></span> AUTO LOAD SELECTED</label>
+                    <div class="c-config-row">
+                        <button class="c-mini-btn" id="cfg-load-now" type="button">LOAD NOW</button>
+                        <button class="c-mini-btn" id="cfg-overwrite" type="button">OVERWRITE</button>
+                        <button class="c-mini-btn" id="cfg-delete" type="button">DELETE</button>
+                    </div>
+                </div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">CREATE</div>
+                    <input class="c-input" id="cfg-name" type="text" placeholder="config name">
+                    <div class="c-config-row">
+                        <button class="c-mini-btn" id="cfg-create" type="button">CREATE</button>
+                    </div>
+                </div>
+                <div class="c-card">
+                    <div class="c-eyebrow-label">IMPORT / EXPORT</div>
+                    <textarea class="c-input c-textarea" id="cfg-payload" placeholder="Paste JSON config payload here"></textarea>
+                    <div class="c-config-row">
+                        <button class="c-mini-btn" id="cfg-export-json" type="button">EXPORT JSON</button>
+                    </div>
+                    <div class="c-config-row">
+                        <button class="c-mini-btn" id="cfg-import" type="button">IMPORT</button>
+                    </div>
+                    <div class="c-cfg-status" id="cfg-status"></div>
+                </div>
+            </div>
+        </div>
+        <div class="c-grip" id="c-grip">
+            <div class="c-dot"></div><div class="c-dot"></div><div class="c-dot"></div>
+            <div class="c-dot"></div><div class="c-dot"></div><div class="c-dot"></div>
+            <div class="c-dot"></div><div class="c-dot"></div><div class="c-dot"></div>
+        </div>
+    `;
+    document.body.appendChild(gui);
+
+    const scaleFont = () => {
+        const fs = Math.max(11, Math.min(16, Math.round((13 * gui.offsetWidth) / 320)));
+        gui.style.setProperty('--fs', `${fs}px`);
+    };
+    new ResizeObserver(scaleFont).observe(gui);
+    scaleFont();
+
+    gui.querySelectorAll('.c-tab').forEach((tab) => {
+        tab.onclick = () => {
+            gui.querySelectorAll('.c-tab, .c-panel').forEach((el) => el.classList.remove('on'));
+            tab.classList.add('on');
+            document.getElementById(`panel-${tab.dataset.tab}`).classList.add('on');
+            if (tab.dataset.tab === 'upgrades') {
+                renderUpgradeToggleList();
+                renderUpgradePriorityList();
+                updateUpgradeBuyModeUi();
+            }
+            if (tab.dataset.tab === 'items') {
+                updateItemBuyModeUi();
+                updateItemSegmentUi();
+                renderItemChoiceList();
+            }
+            if (tab.dataset.tab === 'pets') {
+                updatePetUi();
+                renderPetChoiceLists();
+            }
+        };
+    });
+
+    let isDragging = false;
+    let dragOffset = [0, 0];
+    let isResizing = false;
+    let resizeStart = {};
+    let isMinimized = false;
+    let expandedHeight = '';
+    let nextZoneUiRefreshAt = 0;
+
+    const bodyEl = gui.querySelector('.c-body');
+    const gripEl = gui.querySelector('#c-grip');
+    const minimizeBtn = gui.querySelector('#c-minimize');
+    const configStatusEl = gui.querySelector('#cfg-status');
+    const applyMinimizedState = () => {
+        bodyEl.style.display = isMinimized ? 'none' : 'flex';
+        gripEl.style.display = isMinimized ? 'none' : 'grid';
+        gui.style.minHeight = isMinimized ? '0' : '220px';
+        gui.style.height = isMinimized ? 'auto' : (expandedHeight || '');
+        if (minimizeBtn) {
+            minimizeBtn.textContent = isMinimized ? '□' : '-';
+            minimizeBtn.setAttribute('aria-label', isMinimized ? 'Restore' : 'Minimize');
+        }
+    };
+
+    const showConfigStatus = (text) => {
+        if (!configStatusEl) return;
+        configStatusEl.textContent = text;
+        configStatusEl.style.display = 'block';
+        setTimeout(() => {
+            if (configStatusEl.textContent === text) configStatusEl.style.display = 'none';
+        }, 3000);
+    };
+
+    const sanitizeConfigName = (name) => (name || '').trim().replace(/\s+/g, ' ');
+    const escapeHtml = (value) => String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    const uniqueNames = (names) => {
+        const seen = new Set();
+        return names
+            .map((name) => sanitizeConfigName(name))
+            .filter(Boolean)
+            .filter((name) => {
+                const key = normalizeText(name);
+                if (!key || seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+    };
+
+    const readProfilesFromStorage = () => {
+        const parsed = parseJsonSafe(localStorage.getItem(PROFILES_STORAGE_KEY));
+        const profiles = (parsed && typeof parsed === 'object' && parsed.profiles && typeof parsed.profiles === 'object')
+            ? parsed.profiles
+            : {};
+        Object.keys(profiles).forEach((name) => {
+            if (profiles[name] && typeof profiles[name] === 'object') {
+                configProfiles[name] = profiles[name];
+            }
+        });
+    };
+
+    const persistProfiles = () => {
+        localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify({ version: 1, profiles: configProfiles }));
+        localStorage.setItem(ACTIVE_PROFILE_KEY, selectedProfileName || '');
+        localStorage.setItem(AUTOLOAD_PROFILE_KEY, profileAutoLoadEnabled ? '1' : '0');
+    };
+
+    gui.querySelector('.c-titlebar').onmousedown = (e) => {
+        if (e.target.id === 'c-close' || e.target.id === 'c-minimize') return;
+        isDragging = true;
+        dragOffset = [gui.offsetLeft - e.clientX, gui.offsetTop - e.clientY];
+    };
+    gui.querySelector('#c-grip').onmousedown = (e) => {
+        e.stopPropagation();
+        isResizing = true;
+        resizeStart = { x: e.clientX, y: e.clientY, w: gui.offsetWidth, h: gui.offsetHeight };
+    };
+    const handleWindowMouseMove = (e) => {
+        if (isDragging) {
+            gui.style.left = `${e.clientX + dragOffset[0]}px`;
+            gui.style.top = `${e.clientY + dragOffset[1]}px`;
+        }
+        if (isResizing && !isMinimized) {
+            gui.style.width = `${Math.max(240, Math.min(520, resizeStart.w + (e.clientX - resizeStart.x)))}px`;
+            gui.style.height = `${Math.max(220, Math.min(window.innerHeight * 0.85, resizeStart.h + (e.clientY - resizeStart.y)))}px`;
+            expandedHeight = gui.style.height;
+        }
+    };
+    const handleWindowMouseUp = () => {
+        isDragging = false;
+        isResizing = false;
+    };
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+
+    const setStatus = (text, kind = 'idle') => {
+        if (isDisposed) return;
+        const statusEl = document.getElementById(STATUS_ID);
+        if (!statusEl) return;
+        let dotClass = 'dot';
+        if (kind === 'on') dotClass += ' on';
+        if (kind === 'sell') dotClass += ' sell';
+        if (kind === 'auto') dotClass += ' auto';
+        statusEl.innerHTML = `<div class="${dotClass}"></div>${text}`;
+    };
+
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const normalizeText = (value) => value.replace(/\s+/g, ' ').trim().toUpperCase();
+    const isVisible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const getServerBlockedBanner = () => {
+        return Array.from(document.querySelectorAll('.travel-banner.server-blocked')).find((banner) => {
+            return isVisible(banner) && normalizeText(banner.textContent || '').includes('SERVER UNAVAILABLE');
+        }) || null;
+    };
+    const refreshIfServerBlocked = () => {
+        if (!getServerBlockedBanner()) return false;
+        const lastReload = Number(localStorage.getItem(SERVER_BLOCKED_RELOAD_KEY) || '0');
+        const now = Date.now();
+        if (Number.isFinite(lastReload) && now - lastReload < SERVER_BLOCKED_RELOAD_MS) return true;
+        localStorage.setItem(SERVER_BLOCKED_RELOAD_KEY, String(now));
+        setStatus('SERVER BLOCKED', 'auto');
+        setTimeout(() => window.location.reload(), 250);
+        return true;
+    };
+
+    const findButtonByText = (text) => {
+        const target = normalizeText(text);
+        return Array.from(document.querySelectorAll('button')).find((button) => {
+            if (!isVisible(button) || button.disabled) return false;
+            return normalizeText(button.textContent || '').includes(target);
+        }) || null;
+    };
+
+    const getCleanHookButton = () => {
+        return Array.from(document.querySelectorAll('button.cast-btn.cast-mode-clean')).find((button) => {
+            return isVisible(button) && !button.disabled;
+        }) || null;
+    };
+
+    const getCastButtonState = () => {
+        const button = Array.from(document.querySelectorAll('button.cast-btn.cast-mode-cast')).find((candidate) => {
+            return isVisible(candidate);
+        }) || null;
+        if (!button) return { button: null, ready: false, busy: false };
+        const label = normalizeText(button.textContent || '');
+        const ready = !button.disabled && label === 'CAST!' && !button.classList.contains('casting');
+        const busy = button.disabled || button.classList.contains('casting') || label !== 'CAST!';
+        return { button, ready, busy };
+    };
+
+    const getAnyGameCastButton = () => {
+        return Array.from(document.querySelectorAll('button.cast-btn')).find((button) => {
+            return isVisible(button);
+        }) || null;
+    };
+
+    const requestGameWatchdogReload = (statusText, now = Date.now()) => {
+        if (navigator.onLine === false) {
+            setStatus('WAITING FOR INTERNET', 'auto');
+            return true;
+        }
+
+        const lastReload = Number(localStorage.getItem(GAME_WATCHDOG_RELOAD_KEY) || '0');
+        if (Number.isFinite(lastReload) && now - lastReload < GAME_WATCHDOG_MISSING_MS) return true;
+        localStorage.setItem(GAME_WATCHDOG_RELOAD_KEY, String(now));
+        setStatus(statusText, 'auto');
+        setTimeout(() => window.location.reload(), 250);
+        return true;
+    };
+
+    const runCastProgressWatchdog = (now) => {
+        if (!isRunning) {
+            castProgressStalledSince = 0;
+            return false;
+        }
+
+        if (document.querySelector('.cleaning-card, .cleaning-scrub, .fishing-reel')) {
+            castProgressStalledSince = 0;
+            return false;
+        }
+
+        const castState = getCastButtonState();
+        if (!castState.button) {
+            castProgressStalledSince = 0;
+            return false;
+        }
+
+        if (castState.busy) {
+            castProgressStalledSince = 0;
+            return false;
+        }
+
+        if (!castState.ready) {
+            castProgressStalledSince = 0;
+            return false;
+        }
+
+        if (!castProgressStalledSince) castProgressStalledSince = now;
+        if (now - castProgressStalledSince < GAME_WATCHDOG_MISSING_MS) return false;
+        return requestGameWatchdogReload('CAST STALLED', now);
+    };
+
+    const runGameWatchdogCheck = () => {
+        if (!gameWatchdogEnabled || isDisposed) {
+            castMissingSince = 0;
+            castProgressStalledSince = 0;
+            return;
+        }
+
+        const now = Date.now();
+        if (getAnyGameCastButton()) {
+            castMissingSince = 0;
+            runCastProgressWatchdog(now);
+            return;
+        }
+
+        castProgressStalledSince = 0;
+        if (!castMissingSince) castMissingSince = now;
+        if (now - castMissingSince < GAME_WATCHDOG_MISSING_MS) return;
+
+        requestGameWatchdogReload('REFRESHING PAGE', now);
+    };
+
+    const getCleaningScrubButton = () => {
+        return Array.from(document.querySelectorAll('button.cleaning-scrub')).find((button) => {
+            return isVisible(button) && !button.disabled;
+        }) || null;
+    };
+
+    const getBossTargetButton = () => {
+        return Array.from(document.querySelectorAll('button.boss-target')).find((button) => {
+            return isVisible(button) && !button.disabled;
+        }) || null;
+    };
+
+    const getButtonActionLabel = (button) => {
+        if (!button) return '';
+        const directSpans = Array.from(button.children || [])
+            .filter((child) => child.tagName?.toLowerCase() === 'span')
+            .map((span) => normalizeText(span.textContent || ''))
+            .filter(Boolean);
+        if (directSpans.length) {
+            if (directSpans[0] === 'BUY' && directSpans[1] === 'MAX') return 'BUY MAX';
+            if (directSpans[0] === 'USE' && directSpans[1] === 'ALL') return 'USE ALL';
+            return directSpans[0];
+        }
+
+        const text = normalizeText(button.textContent || '');
+        const knownActions = ['BUY MAX', 'USE ALL', 'MAX LEVEL', 'COLLECT', 'HATCH', 'STACK', 'USE', 'BUY', 'REBIRTH'];
+        return knownActions.find((action) => text === action || text.startsWith(`${action} `)) || text;
+    };
+
+    const getSidebarTabButton = (label) => {
+        const target = normalizeText(label);
+        return Array.from(document.querySelectorAll('.sidebar .tabs .tab')).find((button) => {
+            const labelEl = button.querySelector('.tab-label');
+            return labelEl && normalizeText(labelEl.textContent || '') === target;
+        }) || null;
+    };
+
+    const isSidebarTabActive = (label) => {
+        const tab = getSidebarTabButton(label);
+        return !!tab && tab.classList.contains('active');
+    };
+
+    const openSidebarTab = (label) => {
+        const tab = getSidebarTabButton(label);
+        if (!tab || tab.disabled) return false;
+        if (tab.classList.contains('active')) return true;
+        tab.click();
+        return true;
+    };
+
+    const queueWatersCheckAfterRebirth = (now) => {
+        saveForZone = false;
+        nextZoneCheckAt = 0;
+        nextRebirthCheckAt = now + REBIRTH_CHECK_INTERVAL_MS;
+        if (!autoZone) return;
+        const zoneIndex = AUTOMATION_TASKS.indexOf('zone');
+        if (zoneIndex >= 0) {
+            automationTaskIndex = zoneIndex;
+            automationTaskStartedAt = now;
+            automationTaskHardStartedAt = now;
+        }
+    };
+
+    const isZoneSpendingPaused = () => saveForZone && pauseSpendingForZone;
+
+    const getReadyCharterButton = () => {
+        return Array.from(document.querySelectorAll('button.charter-button, .zone-charter button')).find((button) => {
+            if (!isVisible(button) || button.disabled) return false;
+            const label = normalizeText(button.textContent || '');
+            return label.includes('CHARTER') || label.includes('SAIL');
+        }) || null;
+    };
+
+    const getLiveUpgradeCards = () => {
+        if (!isSidebarTabActive('Upgrade')) return [];
+        return Array.from(document.querySelectorAll('.upgrade'))
+            .filter((card) => {
+                return isVisible(card)
+                    && !card.classList.contains('prestige-upgrade')
+                    && !card.classList.contains('item-card')
+                    && !card.classList.contains('pet-upgrade')
+                    && !card.classList.contains('egg-card');
+            });
+    };
+
+    const getAffordableUpgradeButton = () => {
+        const candidates = getLiveUpgradeCards()
+            .flatMap((card) => Array.from(card.querySelectorAll('button.buy'))
+                .map((button) => ({ button, card })))
+            .filter(({ button, card }) => {
+                if (!isVisible(button) || button.disabled) return false;
+                const label = getButtonActionLabel(button);
+                if (label !== 'BUY' && label !== 'BUY MAX') return false;
+                const upgradeName = getUpgradeCardName(card);
+                return isUpgradeEnabled(upgradeName);
+            });
+        if (!candidates.length) return null;
+
+        const maxCandidates = candidates.filter(({ button }) => {
+            return getButtonActionLabel(button) === 'BUY MAX';
+        });
+        const buyCandidates = candidates.filter(({ button }) => {
+            return getButtonActionLabel(button) === 'BUY';
+        });
+        const usableCandidates = maxCandidates.length ? maxCandidates : buyCandidates;
+        if (!usableCandidates.length) return null;
+
+        syncPriorityUpgradeNames();
+        for (const priorityName of priorityUpgradeNames) {
+            const priorityKey = normalizeUpgradeKey(priorityName);
+            const priorityButton = usableCandidates.find(({ card }) => {
+                return normalizeUpgradeKey(getUpgradeCardName(card)) === priorityKey;
+            });
+            if (priorityButton) return priorityButton.button;
+        }
+
+        return usableCandidates[0]?.button || null;
+    };
+
+    const getRebirthButton = () => {
+        const directButton = Array.from(document.querySelectorAll('button.rebirth-btn')).find((button) => {
+            if (!isVisible(button) || button.disabled) return false;
+            if (button.closest('#chiyo-helper-gui')) return false;
+            if (button.classList.contains('tab') || button.hasAttribute('data-tab')) return false;
+            return true;
+        });
+        if (directButton) return directButton;
+
+        return Array.from(document.querySelectorAll('button')).find((button) => {
+            if (!isVisible(button) || button.disabled) return false;
+            if (button.closest('#chiyo-helper-gui')) return false;
+            if (button.classList.contains('tab') || button.classList.contains('c-tab') || button.hasAttribute('data-tab')) return false;
+            if (button.closest('.panel-switch')) return false;
+            const label = normalizeText(button.textContent || '');
+            return label === 'REBIRTH' || label.includes('REBIRTH');
+        }) || null;
+    };
+
+    const getConfirmRebirthButton = () => {
+        const directButton = Array.from(document.querySelectorAll('button.btn-primary')).find((button) => {
+            return isVisible(button) && !button.disabled && normalizeText(button.textContent || '') === 'REBIRTH';
+        });
+        if (directButton) return directButton;
+
+        return Array.from(document.querySelectorAll('button')).find((button) => {
+            if (!isVisible(button) || button.disabled) return false;
+            if (button.closest('#chiyo-helper-gui')) return false;
+            if (button.classList.contains('tab') || button.classList.contains('c-tab') || button.hasAttribute('data-tab')) return false;
+            if (button.classList.contains('rebirth-btn')) return false;
+            return normalizeText(button.textContent || '') === 'REBIRTH';
+        }) || null;
+    };
+
+    const parseFraction = (text) => {
+        const match = text.match(/(\d+)\s*\/\s*(\d+)/);
+        if (!match) return null;
+        return { current: Number(match[1]), max: Number(match[2]) };
+    };
+
+    const getInventoryState = () => {
+        const amountText = document.querySelector('.inv-bar .row span')?.textContent || '';
+        const parsed = parseFraction(amountText);
+        if (!parsed) return null;
+        return {
+            current: Math.max(0, parsed.current),
+            max: Math.max(1, parsed.max)
+        };
+    };
+
+    const getSellThresholdTarget = (maxSlots) => {
+        if (!Number.isFinite(maxSlots) || maxSlots <= 0) return null;
+        if (!Number.isFinite(autoSellThreshold) || autoSellThreshold <= 0) return maxSlots;
+        return Math.max(1, Math.min(Math.floor(autoSellThreshold), maxSlots));
+    };
+
+    const refreshSellThresholdInput = (forceValueSync = false) => {
+        const thresholdEl = document.getElementById('sell-threshold');
+        const noteEl = document.getElementById('sell-threshold-note');
+        if (!thresholdEl || !noteEl) return;
+        const inventory = getInventoryState();
+        const maxSlots = inventory?.max || 9999;
+        thresholdEl.max = String(maxSlots);
+        if (autoSellThreshold > maxSlots) autoSellThreshold = maxSlots;
+        if (forceValueSync) thresholdEl.value = String(autoSellThreshold);
+        const target = getSellThresholdTarget(maxSlots);
+        if (!target || autoSellThreshold <= 0) {
+            noteEl.textContent = '0 = sell only when full';
+            return;
+        }
+        noteEl.textContent = `Sells at ${target}/${maxSlots} fish`;
+    };
+
+    const getItemCards = () => {
+        return Array.from(document.querySelectorAll('.upgrade.item-card')).filter((card) => isVisible(card));
+    };
+
+    const getItemsSegmentButton = (label) => {
+        const target = normalizeText(label);
+        return Array.from(document.querySelectorAll('.panel-segments button')).find((button) => {
+            return normalizeText(button.textContent || '') === target;
+        }) || null;
+    };
+
+    const getItemOwnedCount = (card) => {
+        const lvlText = card?.querySelector('.name-row .lvl')?.textContent || '';
+        const match = lvlText.match(/owned\s+(\d+)/i);
+        return match ? Number(match[1]) : 0;
+    };
+
+    const getItemCardName = (card) => {
+        return card?.querySelector('.name-row .name')?.textContent?.trim() || 'Item';
+    };
+
+    const getVisibleItemNames = () => {
+        const names = isSidebarTabActive('Items')
+            ? uniqueNames(getItemCards().map((card) => getItemCardName(card)))
+            : [];
+        if (names.length) cachedItemNames = uniqueNames([...cachedItemNames, ...names]);
+        return uniqueNames([...FALLBACK_ITEMS, ...cachedItemNames, ...managedItemNames, ...names]);
+    };
+
+    const setManagedItemName = (name, selected) => {
+        const key = normalizeText(name);
+        managedItemNames = selected
+            ? uniqueNames([...managedItemNames, name])
+            : managedItemNames.filter((item) => normalizeText(item) !== key);
+        renderItemChoiceList();
+    };
+
+    const syncManagedItemNames = (names) => {
+        managedItemNames = uniqueNames(names);
+        renderItemChoiceList();
+    };
+
+    const updateItemDropdownSummary = () => {
+        const countEl = document.getElementById('item-dropdown-count');
+        const arrowEl = document.getElementById('item-dropdown-arrow');
+        const dropdownEl = document.getElementById('item-dropdown');
+        if (countEl) countEl.textContent = managedItemNames.length ? `${managedItemNames.length} ON` : 'ALL';
+        if (arrowEl) arrowEl.textContent = itemDropdownOpen ? '^' : 'v';
+        if (dropdownEl) dropdownEl.classList.toggle('open', itemDropdownOpen);
+    };
+
+    const renderItemChoiceList = () => {
+        const listEl = document.getElementById('item-choice-list');
+        if (!listEl) return;
+        const searchEl = document.getElementById('item-search');
+        if (searchEl && searchEl.value !== itemSearchQuery) searchEl.value = itemSearchQuery;
+        const query = normalizeText(itemSearchQuery);
+        const names = getVisibleItemNames().filter((name) => !query || normalizeText(name).includes(query));
+        const selectedKeys = new Set(managedItemNames.map((name) => normalizeText(name)));
+
+        if (!names.length) {
+            listEl.innerHTML = `<div class="c-empty">${query ? 'No matches' : 'Open the in-game Items tab once so the helper can discover items.'}</div>`;
+            updateItemDropdownSummary();
+            return;
+        }
+
+        listEl.innerHTML = '';
+        names.forEach((name, index) => {
+            const id = `item-opt-${index}`;
+            const checked = selectedKeys.has(normalizeText(name));
+            const card = document.createElement('div');
+            card.className = 'c-card compact';
+            card.innerHTML = `
+                <label class="c-cb-wrap" style="margin-bottom:0;">
+                    <input type="checkbox" class="c-cb item-opt" id="${id}" data-name="${escapeHtml(name)}" ${checked ? 'checked' : ''}>
+                    <span class="c-box"></span> ${escapeHtml(name)}
+                </label>
+            `;
+            listEl.appendChild(card);
+        });
+
+        listEl.querySelectorAll('.item-opt').forEach((input) => {
+            input.onchange = (event) => {
+                setManagedItemName(event.target.dataset.name, event.target.checked);
+            };
+        });
+        updateItemDropdownSummary();
+    };
+
+    const getItemActiveCount = (card) => {
+        const effectText = card?.querySelector('.effect')?.textContent || '';
+        const match = effectText.match(/Active:\s*([\d,]+)\s*left/i);
+        if (!match) return 0;
+        return parseInt(match[1].replace(/,/g, ''), 10);
+    };
+
+    const getItemActionButton = (card, ...labels) => {
+        const targets = new Set(labels.map((label) => normalizeText(label)));
+        return Array.from(card?.querySelectorAll('.item-actions button') || []).find((button) => {
+            if (!isVisible(button) || button.disabled) return false;
+            const label = getButtonActionLabel(button);
+            return targets.has(label);
+        }) || null;
+    };
+
+    const getButtonQuantityLabel = (button) => {
+        if (!button) return '';
+        const directSpans = Array.from(button.children || [])
+            .filter((child) => child.tagName?.toLowerCase() === 'span')
+            .map((span) => normalizeText(span.textContent || ''))
+            .filter(Boolean);
+        const directQuantity = directSpans.find((text) => /^X\s*\d+$/i.test(text));
+        if (directQuantity) return directQuantity;
+
+        const text = normalizeText(button.textContent || '');
+        const match = text.match(/X\s*\d+/i);
+        return match ? match[0] : '';
+    };
+
+    const isFullItemBuyMaxButton = (button) => {
+        if (getButtonActionLabel(button) !== 'BUY MAX') return false;
+        return getButtonQuantityLabel(button).replace(/\s+/g, '') === 'X100';
+    };
+
+    const getFullItemBuyMaxButton = (card) => {
+        return Array.from(card?.querySelectorAll('.item-actions button') || []).find((button) => {
+            return isVisible(button) && !button.disabled && isFullItemBuyMaxButton(button);
+        }) || null;
+    };
+
+    const getAutoItemUseCandidate = () => {
+        const cards = getItemCards();
+        const useManaged = managedItemNames.length > 0;
+        const checkCard = (card) => {
+            const name = getItemCardName(card);
+            if (useManaged && !managedItemNames.some((n) => normalizeText(n) === normalizeText(name))) return false;
+            if (itemActiveThreshold > 0 && getItemActiveCount(card) >= itemActiveThreshold) return false;
+            return true;
+        };
+        for (const card of cards) {
+            if (!checkCard(card)) continue;
+            const owned = getItemOwnedCount(card);
+            if (owned > 0) {
+                const useAllBtn = getItemActionButton(card, 'USE ALL');
+                if (useAllBtn) return { button: useAllBtn, name: getItemCardName(card), mode: 'all' };
+            }
+        }
+        for (const card of cards) {
+            if (!checkCard(card)) continue;
+            const owned = getItemOwnedCount(card);
+            if (owned > 0) {
+                const useBtn = getItemActionButton(card, 'USE', 'STACK');
+                if (useBtn) return { button: useBtn, name: getItemCardName(card), mode: 'one' };
+            }
+        }
+        return null;
+    };
+
+    const getAutoItemBuyCandidate = () => {
+        const cards = getItemCards();
+        const useManaged = managedItemNames.length > 0;
+        for (const card of cards) {
+            const name = getItemCardName(card);
+            if (useManaged && !managedItemNames.some((n) => normalizeText(n) === normalizeText(name))) continue;
+            if (itemActiveThreshold > 0 && getItemActiveCount(card) >= itemActiveThreshold) continue;
+            const button = autoItemBuyMode === 'one'
+                ? getItemActionButton(card, 'BUY')
+                : getFullItemBuyMaxButton(card);
+            if (button) return { button, name, mode: autoItemBuyMode };
+        }
+        return null;
+    };
+
+    const updateItemBuyModeUi = () => {
+        const buyOneEl = document.getElementById('item-buy-one');
+        const buyMaxEl = document.getElementById('item-buy-max');
+        const labelEl = document.getElementById('item-mode-label');
+        if (buyOneEl) buyOneEl.classList.toggle('on', autoItemBuyMode === 'one');
+        if (buyMaxEl) buyMaxEl.classList.toggle('on', autoItemBuyMode === 'max');
+        if (labelEl) labelEl.textContent = `Mode: ${autoItemBuyMode === 'one' ? 'BUY 1' : 'BUY MAX'}`;
+    };
+
+    const updateItemSegmentUi = () => {
+        const segmentEl = document.getElementById('item-segment');
+        if (segmentEl) segmentEl.value = itemSegmentMode;
+    };
+
+    const updateUpgradeBuyModeUi = () => {
+        const modeEl = document.getElementById('upgrade-buy-mode');
+        if (modeEl) modeEl.value = upgradeBuyMode;
+    };
+
+    const getPetUpgradeCards = () => {
+        return Array.from(document.querySelectorAll('.upgrade.pet-upgrade')).filter((card) => isVisible(card));
+    };
+
+    const getPetCardName = (card) => {
+        return card?.querySelector('.name-row .name')?.textContent?.trim() || '';
+    };
+
+    const getPetLicenseBuyButton = () => {
+        const card = getPetUpgradeCards().find((candidate) => normalizeText(getPetCardName(candidate)) === 'PET LICENSE');
+        if (!card) return null;
+        const button = card.querySelector('button.buy');
+        if (!button || button.disabled || !isVisible(button)) return null;
+        const label = normalizeText(button.querySelector('span')?.textContent || button.textContent || '');
+        if (label !== 'BUY') return null;
+        return button;
+    };
+
+    const getPetUpgradeBuyButton = () => {
+        for (const card of getPetUpgradeCards()) {
+            if (normalizeText(getPetCardName(card)) === 'PET LICENSE') continue;
+            const button = card.querySelector('button.buy');
+            if (!button || button.disabled || !isVisible(button)) continue;
+            const label = normalizeText(button.querySelector('span')?.textContent || button.textContent || '');
+            if (label === 'BUY') return { button, name: getPetCardName(card) };
+        }
+        return null;
+    };
+
+    const getEggCards = () => {
+        return Array.from(document.querySelectorAll('.upgrade.egg-card')).filter((card) => isVisible(card));
+    };
+
+    const getEggCardName = (card) => {
+        return card?.querySelector('.name-row .name')?.textContent?.trim() || '';
+    };
+
+    const getVisibleEggNames = () => {
+        const names = uniqueNames(getEggCards().map((card) => getEggCardName(card)));
+        if (names.length) cachedEggNames = uniqueNames([...cachedEggNames, ...names]);
+        return uniqueNames([...FALLBACK_EGGS, ...cachedEggNames, ...desiredEggNames, ...names]);
+    };
+
+    const getEggOwnedCount = (card) => {
+        const lvlText = card?.querySelector('.name-row .lvl')?.textContent || '';
+        const match = lvlText.match(/owned\s+(\d+)/i);
+        return match ? Number(match[1]) : 0;
+    };
+
+    const getEggActionButton = (card, label) => {
+        const target = normalizeText(label);
+        return Array.from(card?.querySelectorAll('.item-actions button, button.buy, button') || []).find((button) => {
+            if (!isVisible(button) || button.disabled) return false;
+            const label = normalizeText(button.querySelector('span')?.textContent || button.textContent || '');
+            if (target === 'BUY') return label === 'BUY' || label === 'BUY 1';
+            if (target === 'HATCH') return label === 'HATCH' || label === 'USE' || label === 'START';
+            return label === target;
+        }) || null;
+    };
+
+    const getOpenHatchSlotCount = () => {
+        return Array.from(document.querySelectorAll('.hatch-slot')).filter((slot) => {
+            if (!isVisible(slot)) return false;
+            const state = normalizeText(slot.querySelector('.slot-top strong')?.textContent || '');
+            const note = normalizeText(slot.querySelector('.slot-note')?.textContent || '');
+            return state === 'OPEN' || note.includes('CHOOSE AN EGG');
+        }).length;
+    };
+
+    const getReadyPetCollectButton = () => {
+        return Array.from(document.querySelectorAll('.hatch-slot.ready .slot-action')).find((button) => {
+            const slot = button.closest('.hatch-slot');
+            const slotState = normalizeText(slot?.querySelector('.slot-top strong')?.textContent || '');
+            if (slot?.classList.contains('locked') || slotState === 'LOCKED') return false;
+            const signature = normalizeText(slot?.querySelector('.slot-top')?.textContent || slot?.textContent || button.textContent || '');
+            if (signature && signature === lastEggCollectSignature && Date.now() - lastEggCollectAt < EGG_COLLECT_REPEAT_GUARD_MS) return false;
+            return isVisible(button)
+                && !button.disabled
+                && normalizeText(button.textContent || '') === 'COLLECT';
+        }) || null;
+    };
+
+    const getRotatingEggCard = (predicate) => {
+        const cards = getEggCards();
+        if (!cards.length) return null;
+        const wanted = desiredEggNames.length ? desiredEggNames : cards.map((card) => getEggCardName(card)).filter(Boolean);
+        if (!wanted.length) return null;
+        for (let offset = 0; offset < wanted.length; offset += 1) {
+            const index = (petEggRotationIndex + offset) % wanted.length;
+            const wantedKey = normalizeText(wanted[index]);
+            const card = cards.find((candidate) => normalizeText(getEggCardName(candidate)) === wantedKey);
+            if (card && predicate(card)) {
+                petEggRotationIndex = (index + 1) % wanted.length;
+                return card;
+            }
+        }
+        return null;
+    };
+
+    const getPetEggHatchCandidate = () => {
+        const openSlots = getOpenHatchSlotCount();
+        if (openSlots <= 0) return null;
+        const card = getRotatingEggCard((candidate) => {
+            return !!getEggActionButton(candidate, 'HATCH');
+        });
+        if (!card) return null;
+        return { button: getEggActionButton(card, 'HATCH'), name: getEggCardName(card) };
+    };
+
+    const getPetEggBuyCandidate = () => {
+        const openSlots = getOpenHatchSlotCount();
+        if (openSlots <= 0) return null;
+        const card = getRotatingEggCard((candidate) => {
+            return getEggOwnedCount(candidate) < openSlots && !!getEggActionButton(candidate, 'BUY');
+        });
+        if (!card) return null;
+        return { button: getEggActionButton(card, 'BUY'), name: getEggCardName(card), openSlots };
+    };
+
+    const getPetCollectionCards = () => {
+        return Array.from(document.querySelectorAll('.pet-collection-layout .pet-card')).filter((card) => {
+            return isVisible(card) && !card.classList.contains('locked');
+        });
+    };
+
+    const getPetCollectionName = (card) => {
+        return card?.querySelector('.pet-name')?.textContent?.trim() || '';
+    };
+
+    const getEquippedPetNames = () => {
+        const companionSlotNames = Array.from(document.querySelectorAll('.companion-grid .companion-slot.filled'))
+            .map((slot) => (slot.textContent || '').split('\n').map((line) => line.trim()).find(Boolean))
+            .filter(Boolean);
+        const names = [
+            ...Array.from(document.querySelectorAll('.companion-grid .companion-slot.filled .companion-name')),
+            ...Array.from(document.querySelectorAll('.companion-slot.filled .pet-name')),
+            ...Array.from(document.querySelectorAll('.companion-slot.filled [class*="name"]')),
+            ...Array.from(document.querySelectorAll('.pet-collection-layout .pet-card.equipped .pet-name'))
+        ]
+            .map((el) => el.textContent?.trim())
+            .filter(Boolean);
+        const unique = uniqueNames([...names, ...companionSlotNames]).filter((name) => normalizeText(name) !== '???');
+        if (unique.length) cachedEquippedPetNames = unique;
+        return unique;
+    };
+
+    const getOwnedPetNames = () => {
+        const names = uniqueNames([
+            ...getPetCollectionCards().map((card) => getPetCollectionName(card)),
+            ...getEquippedPetNames()
+        ]).filter((name) => normalizeText(name) !== '???');
+        return names;
+    };
+
+    const getVisiblePetNames = () => {
+        const names = getOwnedPetNames();
+        if (names.length) cachedPetNames = uniqueNames([...cachedPetNames, ...names]);
+        return uniqueNames([...FALLBACK_PETS, ...cachedPetNames, ...desiredPetNames, ...names]);
+    };
+
+    const getSelectableWantedPetNames = () => {
+        const owned = getOwnedPetNames();
+        if (owned.length) return owned;
+        if (cachedEquippedPetNames.length) return cachedEquippedPetNames;
+        return desiredPetNames;
+    };
+
+    const refreshPetDiscovery = () => {
+        getVisibleEggNames();
+        getVisiblePetNames();
+        getEquippedPetNames();
+    };
+
+    const getOpenCompanionSlotCount = () => {
+        return Array.from(document.querySelectorAll('.companion-grid .companion-slot')).filter((slot) => {
+            return isVisible(slot)
+                && !slot.classList.contains('filled')
+                && normalizeText(slot.textContent || '').includes('OPEN COMPANION SLOT');
+        }).length;
+    };
+
+    const areWantedPetsEquipped = () => {
+        if (!desiredPetNames.length) return true;
+        const live = getEquippedPetNames();
+        const names = live.length ? live : cachedEquippedPetNames;
+        if (!names.length) return false;
+        const equippedKeys = new Set(names.map((name) => normalizeText(name)));
+        return desiredPetNames.every((name) => equippedKeys.has(normalizeText(name)));
+    };
+
+    const getAutoPetEquipCandidate = () => {
+        if (!autoPetEquip || !desiredPetNames.length) return null;
+        const equippedKeys = new Set(getEquippedPetNames().map((name) => normalizeText(name)));
+        const wantedKeys = new Set(desiredPetNames.map((name) => normalizeText(name)));
+        const missingName = desiredPetNames.find((name) => !equippedKeys.has(normalizeText(name)));
+        if (!missingName) return null;
+
+        const cards = getPetCollectionCards();
+        const missingCard = cards.find((card) => normalizeText(getPetCollectionName(card)) === normalizeText(missingName));
+        if (!missingCard) return null;
+
+        const equipButton = Array.from(missingCard.querySelectorAll('button')).find((button) => {
+            return isVisible(button) && !button.disabled && normalizeText(button.textContent || '') === 'EQUIP';
+        });
+        if (equipButton) return { button: equipButton, name: missingName, mode: 'equip' };
+
+        if (getOpenCompanionSlotCount() > 0) return null;
+        const replaceCard = cards.find((card) => {
+            return card.classList.contains('equipped')
+                && !wantedKeys.has(normalizeText(getPetCollectionName(card)));
+        });
+        const unequipButton = Array.from(replaceCard?.querySelectorAll('button') || []).find((button) => {
+            return isVisible(button) && !button.disabled && normalizeText(button.textContent || '') === 'UNEQUIP';
+        });
+        if (unequipButton) return { button: unequipButton, name: getPetCollectionName(replaceCard), mode: 'unequip' };
+        return null;
+    };
+
+    const updatePetUi = (text) => {
+        const statusEl = document.getElementById('pet-status-label');
+        if (!statusEl) return;
+        if (typeof text === 'string') statusEl.textContent = text;
+    };
+
+    const syncSelectedNames = (kind, names) => {
+        if (kind === 'egg') {
+            desiredEggNames = uniqueNames(names);
+            petEggRotationIndex = 0;
+        } else {
+            desiredPetNames = uniqueNames(names);
+        }
+        renderPetChoiceLists();
+    };
+
+    const setSelectedName = (kind, name, selected) => {
+        const current = kind === 'egg' ? desiredEggNames : desiredPetNames;
+        const key = normalizeText(name);
+        const next = selected
+            ? uniqueNames([...current, name])
+            : current.filter((item) => normalizeText(item) !== key);
+        syncSelectedNames(kind, next);
+    };
+
+    const renderPetChoiceList = (kind) => {
+        const isEgg = kind === 'egg';
+        const listEl = document.getElementById(isEgg ? 'pet-egg-choice-list' : 'pet-wanted-choice-list');
+        if (!listEl) return;
+        const query = normalizeText(isEgg ? petEggSearchQuery : petWantedSearchQuery);
+        const names = (isEgg ? getVisibleEggNames() : getVisiblePetNames())
+            .filter((name) => !query || normalizeText(name).includes(query));
+        const selected = isEgg ? desiredEggNames : desiredPetNames;
+        const selectedKeys = new Set(selected.map((name) => normalizeText(name)));
+
+        if (!names.length) {
+            listEl.innerHTML = `<div class="c-empty">${query ? 'No matches' : `Open the in-game Pets tab once so the helper can discover ${isEgg ? 'eggs' : 'owned pets'}.`}</div>`;
+            return;
+        }
+
+        listEl.innerHTML = '';
+        names.forEach((name, index) => {
+            const id = `${isEgg ? 'pet-egg-opt' : 'pet-wanted-opt'}-${index}`;
+            const checked = selectedKeys.has(normalizeText(name));
+            const card = document.createElement('div');
+            card.className = 'c-card compact';
+            card.innerHTML = `
+                <label class="c-cb-wrap" style="margin-bottom:0;">
+                    <input type="checkbox" class="c-cb ${isEgg ? 'pet-egg-opt' : 'pet-wanted-opt'}" id="${id}" data-name="${escapeHtml(name)}" ${checked ? 'checked' : ''}>
+                    <span class="c-box"></span> ${escapeHtml(name)}
+                </label>
+            `;
+            listEl.appendChild(card);
+        });
+
+        listEl.querySelectorAll(isEgg ? '.pet-egg-opt' : '.pet-wanted-opt').forEach((input) => {
+            input.onchange = (event) => {
+                setSelectedName(kind, event.target.dataset.name, event.target.checked);
+            };
+        });
+    };
+
+    const updatePetDropdownSummaries = () => {
+        const eggNames = getVisibleEggNames();
+        const petNames = getVisiblePetNames();
+        const eggCountEl = document.getElementById('pet-egg-dropdown-count');
+        const petCountEl = document.getElementById('pet-wanted-dropdown-count');
+        const eggArrowEl = document.getElementById('pet-egg-dropdown-arrow');
+        const petArrowEl = document.getElementById('pet-wanted-dropdown-arrow');
+        const eggDropdownEl = document.getElementById('pet-egg-dropdown');
+        const petDropdownEl = document.getElementById('pet-wanted-dropdown');
+        if (eggCountEl) eggCountEl.textContent = desiredEggNames.length ? `${desiredEggNames.length} ON` : (eggNames.length ? 'ALL' : 'SYNC');
+        if (petCountEl) petCountEl.textContent = desiredPetNames.length ? `${desiredPetNames.length} ON` : (petNames.length ? 'NONE' : 'SYNC');
+        if (eggArrowEl) eggArrowEl.textContent = petEggDropdownOpen ? '^' : 'v';
+        if (petArrowEl) petArrowEl.textContent = petWantedDropdownOpen ? '^' : 'v';
+        if (eggDropdownEl) eggDropdownEl.classList.toggle('open', petEggDropdownOpen);
+        if (petDropdownEl) petDropdownEl.classList.toggle('open', petWantedDropdownOpen);
+    };
+
+    const renderPetChoiceLists = () => {
+        refreshPetDiscovery();
+        const eggSearchEl = document.getElementById('pet-egg-search');
+        const wantedSearchEl = document.getElementById('pet-wanted-search');
+        if (eggSearchEl && eggSearchEl.value !== petEggSearchQuery) eggSearchEl.value = petEggSearchQuery;
+        if (wantedSearchEl && wantedSearchEl.value !== petWantedSearchQuery) wantedSearchEl.value = petWantedSearchQuery;
+        renderPetChoiceList('egg');
+        renderPetChoiceList('pet');
+        updatePetDropdownSummaries();
+    };
+
+    const normalizeUpgradeKey = (name) => normalizeText(name || '');
+
+    const getUpgradeCardName = (card) => {
+        return card?.querySelector('.name-row .name')?.textContent?.trim() || '';
+    };
+
+    const hasLiveUpgradeCards = () => {
+        return getLiveUpgradeCards().length > 0;
+    };
+
+    const getVisibleUpgradeNames = () => {
+        const names = isSidebarTabActive('Upgrade')
+            ? getLiveUpgradeCards()
+                .map((card) => getUpgradeCardName(card))
+                .filter(Boolean)
+            : [];
+        if (names.length) {
+            cachedUpgradeNames = [...names];
+            return names;
+        }
+        return cachedUpgradeNames.length ? cachedUpgradeNames : FALLBACK_UPGRADES;
+    };
+
+    const getEnabledUpgradeNames = () => {
+        return getVisibleUpgradeNames().filter((name) => isUpgradeEnabled(name));
+    };
+
+    const isUpgradeEnabled = (name) => {
+        const key = normalizeUpgradeKey(name);
+        if (!key) return true;
+        if (!upgradePreferences.has(key)) upgradePreferences.set(key, true);
+        return upgradePreferences.get(key);
+    };
+
+    const setUpgradeEnabled = (name, enabled) => {
+        const key = normalizeUpgradeKey(name);
+        if (!key) return;
+        upgradePreferences.set(key, enabled);
+        if (!enabled) {
+            priorityUpgradeNames = priorityUpgradeNames.filter((item) => normalizeUpgradeKey(item) !== key);
+        }
+    };
+
+    const setAllUpgradePreferences = (enabled) => {
+        getVisibleUpgradeNames().forEach((name) => setUpgradeEnabled(name, enabled));
+        renderUpgradeToggleList();
+        renderUpgradePriorityList();
+    };
+
+    const syncPriorityUpgradeNames = () => {
+        if (!hasLiveUpgradeCards()) {
+            const seen = new Set();
+            priorityUpgradeNames = priorityUpgradeNames.filter((name) => {
+                const key = normalizeUpgradeKey(name);
+                if (!key || seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+            return;
+        }
+        const enabledKeys = new Set(getEnabledUpgradeNames().map((name) => normalizeUpgradeKey(name)));
+        const seen = new Set();
+        priorityUpgradeNames = priorityUpgradeNames.filter((name) => {
+            const key = normalizeUpgradeKey(name);
+            if (!enabledKeys.has(key) || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    };
+
+    const addPriorityUpgrade = (name) => {
+        const key = normalizeUpgradeKey(name);
+        if (!key) return;
+        syncPriorityUpgradeNames();
+        if (!priorityUpgradeNames.some((item) => normalizeUpgradeKey(item) === key)) {
+            priorityUpgradeNames.push(name);
+        }
+        renderUpgradePriorityList();
+    };
+
+    const removePriorityUpgrade = (name) => {
+        const key = normalizeUpgradeKey(name);
+        priorityUpgradeNames = priorityUpgradeNames.filter((item) => normalizeUpgradeKey(item) !== key);
+        renderUpgradePriorityList();
+    };
+
+    const movePriorityUpgrade = (name, direction) => {
+        const key = normalizeUpgradeKey(name);
+        const index = priorityUpgradeNames.findIndex((item) => normalizeUpgradeKey(item) === key);
+        if (index < 0) return;
+        const targetIndex = direction === 'up' ? index - 1 : index + 1;
+        if (targetIndex < 0 || targetIndex >= priorityUpgradeNames.length) return;
+        const copy = [...priorityUpgradeNames];
+        const [item] = copy.splice(index, 1);
+        copy.splice(targetIndex, 0, item);
+        priorityUpgradeNames = copy;
+        renderUpgradePriorityList();
+    };
+
+    const renderUpgradeToggleList = () => {
+        const listEl = document.getElementById('upgrade-toggle-list');
+        if (!listEl) return;
+
+        const names = getVisibleUpgradeNames();
+        if (!names.length) {
+            listEl.innerHTML = '<div class="c-empty">Open the in-game Upgrade tab once so the helper can discover your current upgrades.</div>';
+            return;
+        }
+
+        listEl.innerHTML = '';
+        names.forEach((name, index) => {
+            const key = `upgrade-opt-${index}`;
+            const checked = isUpgradeEnabled(name);
+            const card = document.createElement('div');
+            card.className = 'c-card compact';
+            card.innerHTML = `
+                <label class="c-cb-wrap" style="margin-bottom:0;">
+                    <input type="checkbox" class="c-cb upgrade-opt" id="${key}" data-upgrade-name="${name.replace(/"/g, '&quot;')}" ${checked ? 'checked' : ''}>
+                    <span class="c-box"></span> ${name}
+                </label>
+            `;
+            listEl.appendChild(card);
+        });
+
+        listEl.querySelectorAll('.upgrade-opt').forEach((input) => {
+            input.onchange = (event) => {
+                setUpgradeEnabled(event.target.dataset.upgradeName, event.target.checked);
+                updateUpgradeDropdownSummary();
+                renderUpgradePriorityList();
+            };
+        });
+
+        updateUpgradeDropdownSummary();
+    };
+
+    const updateUpgradeDropdownSummary = () => {
+        const names = getVisibleUpgradeNames();
+        const enabledCount = names.filter((name) => isUpgradeEnabled(name)).length;
+        const countEl = document.getElementById('upgrade-dropdown-count');
+        const arrowEl = document.getElementById('upgrade-dropdown-arrow');
+        const dropdownEl = document.getElementById('upgrade-dropdown');
+        if (countEl) countEl.textContent = `${enabledCount} ON`;
+        if (arrowEl) arrowEl.textContent = upgradesDropdownOpen ? '^' : 'v';
+        if (dropdownEl) dropdownEl.classList.toggle('open', upgradesDropdownOpen);
+    };
+
+    const renderUpgradePriorityList = () => {
+        const listEl = document.getElementById('upgrade-priority-list');
+        if (!listEl) return;
+
+        syncPriorityUpgradeNames();
+        const choices = getEnabledUpgradeNames();
+        if (!choices.length) {
+            listEl.innerHTML = '<div class="c-empty">Enable a few upgrades in the filters above, then set their order here.</div>';
+            updatePriorityDropdownSummary();
+            return;
+        }
+
+        listEl.innerHTML = '';
+        choices.forEach((name) => {
+            const index = priorityUpgradeNames.findIndex((item) => normalizeUpgradeKey(item) === normalizeUpgradeKey(name));
+            const prioritized = index >= 0;
+            const card = document.createElement('div');
+            card.className = 'c-card compact';
+            card.innerHTML = `
+                <div class="c-priority-row">
+                    <div class="c-priority-meta">
+                        <span class="c-priority-badge${prioritized ? ' on' : ''}">${prioritized ? `#${index + 1}` : '--'}</span>
+                        <span class="c-priority-name">${name}</span>
+                    </div>
+                    <div class="c-priority-actions"></div>
+                </div>
+            `;
+
+            const actions = card.querySelector('.c-priority-actions');
+            if (!prioritized) {
+                const addBtn = document.createElement('button');
+                addBtn.type = 'button';
+                addBtn.className = 'c-priority-btn add';
+                addBtn.textContent = 'ADD';
+                addBtn.onclick = () => addPriorityUpgrade(name);
+                actions.appendChild(addBtn);
+            } else {
+                const upBtn = document.createElement('button');
+                upBtn.type = 'button';
+                upBtn.className = 'c-priority-btn';
+                upBtn.textContent = 'UP';
+                upBtn.disabled = index === 0;
+                upBtn.onclick = () => movePriorityUpgrade(name, 'up');
+
+                const downBtn = document.createElement('button');
+                downBtn.type = 'button';
+                downBtn.className = 'c-priority-btn';
+                downBtn.textContent = 'DN';
+                downBtn.disabled = index === priorityUpgradeNames.length - 1;
+                downBtn.onclick = () => movePriorityUpgrade(name, 'down');
+
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'c-priority-btn remove';
+                removeBtn.textContent = 'CLR';
+                removeBtn.onclick = () => removePriorityUpgrade(name);
+
+                actions.appendChild(upBtn);
+                actions.appendChild(downBtn);
+                actions.appendChild(removeBtn);
+            }
+
+            listEl.appendChild(card);
+        });
+
+        updatePriorityDropdownSummary();
+    };
+
+    const updatePriorityDropdownSummary = () => {
+        const valueEl = document.getElementById('priority-dropdown-value');
+        const arrowEl = document.getElementById('priority-dropdown-arrow');
+        const dropdownEl = document.getElementById('priority-dropdown');
+        syncPriorityUpgradeNames();
+        if (valueEl) valueEl.textContent = priorityUpgradeNames.length ? `${priorityUpgradeNames.length} SET` : 'DEFAULT';
+        if (arrowEl) arrowEl.textContent = priorityDropdownOpen ? '^' : 'v';
+        if (dropdownEl) dropdownEl.classList.toggle('open', priorityDropdownOpen);
+    };
+
+    const persistRuntimeToggles = () => {
+        localStorage.setItem(AUTOSTART_BOT_KEY, autoStartBotEnabled ? '1' : '0');
+        localStorage.setItem(GAME_WATCHDOG_KEY, gameWatchdogEnabled ? '1' : '0');
+        localStorage.setItem(TOAST_WATCHDOG_KEY, toastWatchdogEnabled ? '1' : '0');
+    };
+
+    const captureCurrentConfig = () => {
+        const asBool = (id, fallback = false) => {
+            const el = document.getElementById(id);
+            return el ? !!el.checked : fallback;
+        };
+        return {
+            version: 1,
+            savedAt: new Date().toISOString(),
+            running: isRunning,
+            toggles: {
+                autoRepair: asBool('repair-chk', autoRepair),
+                autoClean: asBool('clean-chk', autoClean),
+                autoSell: asBool('sell-chk', autoSell),
+                autoUpgrades: asBool('upgrade-chk', autoUpgrades),
+                autoZone: asBool('zone-chk', autoZone),
+                pauseSpendingForZone: asBool('zone-save-pause-chk', pauseSpendingForZone),
+                autoBoss: asBool('boss-chk', autoBoss),
+                autoRebirth: asBool('rebirth-chk', autoRebirth),
+                autoItems: asBool('item-chk', autoItems),
+                autoItemUse: asBool('item-use-chk', autoItemUse),
+                autoPets: asBool('pet-chk', autoPets),
+                autoPetClaim: asBool('pet-claim-chk', autoPetClaim),
+                autoPetUpgrades: asBool('pet-upgrades-chk', autoPetUpgrades),
+                autoPetEggs: asBool('pet-eggs-chk', autoPetEggs),
+                autoPetEquip: asBool('pet-equip-chk', autoPetEquip),
+                rebirthNeedsWantedPets: asBool('rebirth-pets-ready-chk', rebirthNeedsWantedPets),
+                rebirthWhileSavingZone: asBool('rebirth-save-zone-chk', rebirthWhileSavingZone),
+                autoStartBot: asBool('auto-start-chk', autoStartBotEnabled),
+                gameWatchdogEnabled: asBool('watchdog-chk', gameWatchdogEnabled),
+                toastWatchdogEnabled: asBool('toast-watchdog-chk', toastWatchdogEnabled),
+                webhookEnabled: asBool('webhook-enabled', webhookEnabled)
+            },
+            castDelay: currentSpeed,
+            sellThreshold: autoSellThreshold,
+            webhook: {
+                url: document.getElementById('webhook-url')?.value || '',
+                notifyRare: asBool('notify-rare', false),
+                notifyEpic: asBool('notify-epic', false),
+                notifyLegendary: asBool('notify-legendary', true),
+                notifyMythic: asBool('notify-mythic', true)
+            },
+            items: {
+                buyMode: autoItemBuyMode,
+                segment: itemSegmentMode,
+                managed: [...managedItemNames],
+                activeThreshold: itemActiveThreshold
+            },
+            pets: {
+                eggs: [...desiredEggNames],
+                wanted: [...desiredPetNames],
+                eggRotationIndex: petEggRotationIndex
+            },
+            upgrades: {
+                buyMode: upgradeBuyMode,
+                enabled: Object.fromEntries(upgradePreferences.entries()),
+                priority: [...priorityUpgradeNames]
+            }
+        };
+    };
+
+    const applyConfigSnapshot = (snapshot) => {
+        if (!snapshot || typeof snapshot !== 'object') return false;
+        const toggles = snapshot.toggles && typeof snapshot.toggles === 'object' ? snapshot.toggles : {};
+        const webhook = snapshot.webhook && typeof snapshot.webhook === 'object' ? snapshot.webhook : {};
+        const items = snapshot.items && typeof snapshot.items === 'object' ? snapshot.items : {};
+        const pets = snapshot.pets && typeof snapshot.pets === 'object' ? snapshot.pets : {};
+        const upgrades = snapshot.upgrades && typeof snapshot.upgrades === 'object' ? snapshot.upgrades : {};
+
+        const setToggle = (id, value, assign) => {
+            if (typeof value !== 'boolean') return;
+            const el = document.getElementById(id);
+            if (el) el.checked = value;
+            assign(value);
+        };
+
+        setToggle('repair-chk', toggles.autoRepair, (value) => { autoRepair = value; });
+        setToggle('clean-chk', toggles.autoClean, (value) => { autoClean = value; });
+        setToggle('sell-chk', toggles.autoSell, (value) => { autoSell = value; });
+        setToggle('upgrade-chk', toggles.autoUpgrades, (value) => { autoUpgrades = value; nextUpgradeCheckAt = 0; });
+        setToggle('zone-chk', toggles.autoZone, (value) => { autoZone = value; if (!value) saveForZone = false; nextZoneCheckAt = 0; });
+        setToggle('zone-save-pause-chk', toggles.pauseSpendingForZone, (value) => {
+            pauseSpendingForZone = value;
+            nextZoneCheckAt = 0;
+            nextUpgradeCheckAt = 0;
+            nextItemCheckAt = 0;
+            nextPetCheckAt = 0;
+            nextRebirthCheckAt = 0;
+            automationTaskStartedAt = 0;
+        });
+        setToggle('boss-chk', toggles.autoBoss, (value) => { autoBoss = value; });
+        setToggle('rebirth-chk', toggles.autoRebirth, (value) => { autoRebirth = value; nextRebirthCheckAt = 0; });
+        setToggle('item-chk', toggles.autoItems, (value) => { autoItems = value; nextItemCheckAt = 0; });
+        setToggle('item-use-chk', toggles.autoItemUse, (value) => { autoItemUse = value; nextItemCheckAt = 0; });
+        setToggle('pet-chk', toggles.autoPets, (value) => { autoPets = value; nextPetCheckAt = 0; });
+        setToggle('pet-claim-chk', toggles.autoPetClaim, (value) => { autoPetClaim = value; nextPetCheckAt = 0; });
+        setToggle('pet-upgrades-chk', toggles.autoPetUpgrades, (value) => { autoPetUpgrades = value; nextPetCheckAt = 0; });
+        setToggle('pet-eggs-chk', toggles.autoPetEggs, (value) => { autoPetEggs = value; nextPetCheckAt = 0; });
+        setToggle('pet-equip-chk', toggles.autoPetEquip, (value) => { autoPetEquip = value; nextPetCheckAt = 0; });
+        setToggle('rebirth-pets-ready-chk', toggles.rebirthNeedsWantedPets, (value) => { rebirthNeedsWantedPets = value; nextRebirthCheckAt = 0; });
+        setToggle('rebirth-save-zone-chk', toggles.rebirthWhileSavingZone, (value) => { rebirthWhileSavingZone = value; nextRebirthCheckAt = 0; });
+        setToggle('auto-start-chk', toggles.autoStartBot, (value) => { autoStartBotEnabled = value; persistRuntimeToggles(); });
+        setToggle('watchdog-chk', toggles.gameWatchdogEnabled, (value) => { gameWatchdogEnabled = value; castMissingSince = 0; persistRuntimeToggles(); });
+        setToggle('toast-watchdog-chk', toggles.toastWatchdogEnabled, (value) => { toastWatchdogEnabled = value; blockedActionToastTimes = []; persistRuntimeToggles(); });
+        setToggle('webhook-enabled', toggles.webhookEnabled, (value) => { webhookEnabled = value; });
+        if (typeof snapshot.running === 'boolean') pendingRunningState = snapshot.running;
+
+        if (typeof snapshot.sellThreshold === 'number' && Number.isFinite(snapshot.sellThreshold)) {
+            autoSellThreshold = Math.max(0, Math.floor(snapshot.sellThreshold));
+        }
+        if (items.buyMode === 'one' || items.buyMode === 'max') {
+            autoItemBuyMode = items.buyMode;
+        }
+        if (items.segment === 'TACKLE' || items.segment === 'ENCHANT' || items.segment === 'KITCHEN') {
+            itemSegmentMode = items.segment;
+        }
+        if (Array.isArray(items.managed)) {
+            managedItemNames = items.managed.filter((n) => typeof n === 'string').map((n) => sanitizeConfigName(n)).filter(Boolean);
+            cachedItemNames = uniqueNames([...cachedItemNames, ...managedItemNames]);
+        }
+        if (typeof items.activeThreshold === 'number' && Number.isFinite(items.activeThreshold)) {
+            itemActiveThreshold = Math.max(0, Math.floor(items.activeThreshold));
+            const el = document.getElementById('item-active-threshold');
+            if (el) el.value = String(itemActiveThreshold);
+        }
+        if (upgrades.buyMode === 'max' || upgrades.buyMode === 'buy') {
+            upgradeBuyMode = upgrades.buyMode;
+        }
+        if (Array.isArray(pets.eggs)) {
+            desiredEggNames = pets.eggs.filter((name) => typeof name === 'string').map((name) => sanitizeConfigName(name)).filter(Boolean);
+            cachedEggNames = uniqueNames([...cachedEggNames, ...desiredEggNames]);
+        }
+        if (Array.isArray(pets.wanted)) {
+            desiredPetNames = pets.wanted.filter((name) => typeof name === 'string').map((name) => sanitizeConfigName(name)).filter(Boolean);
+            cachedPetNames = uniqueNames([...cachedPetNames, ...desiredPetNames]);
+        }
+        if (typeof pets.eggRotationIndex === 'number' && Number.isFinite(pets.eggRotationIndex)) {
+            petEggRotationIndex = Math.max(0, Math.floor(pets.eggRotationIndex));
+        }
+        updateItemBuyModeUi();
+        updateItemSegmentUi();
+        renderItemChoiceList();
+        updateUpgradeBuyModeUi();
+        renderPetChoiceLists();
+        refreshSellThresholdInput(true);
+
+        if (typeof snapshot.castDelay === 'number' && Number.isFinite(snapshot.castDelay)) {
+            currentSpeed = Math.max(100, Math.min(5000, Math.round(snapshot.castDelay)));
+            const delaySlide = document.getElementById('delay-slide');
+            const delayVal = document.getElementById('delay-val');
+            if (delaySlide) delaySlide.value = String(currentSpeed);
+            if (delayVal) delayVal.innerText = `${(currentSpeed / 1000).toFixed(1)}s`;
+            nextCastAttemptAt = Math.min(nextCastAttemptAt || Date.now(), Date.now() + currentSpeed);
+        }
+
+        const webhookUrlEl = document.getElementById('webhook-url');
+        if (webhookUrlEl && typeof webhook.url === 'string') webhookUrlEl.value = webhook.url;
+        if (typeof webhook.notifyRare === 'boolean') document.getElementById('notify-rare').checked = webhook.notifyRare;
+        if (typeof webhook.notifyEpic === 'boolean') document.getElementById('notify-epic').checked = webhook.notifyEpic;
+        if (typeof webhook.notifyLegendary === 'boolean') document.getElementById('notify-legendary').checked = webhook.notifyLegendary;
+        if (typeof webhook.notifyMythic === 'boolean') document.getElementById('notify-mythic').checked = webhook.notifyMythic;
+
+        upgradePreferences.clear();
+        if (upgrades.enabled && typeof upgrades.enabled === 'object') {
+            Object.entries(upgrades.enabled).forEach(([key, enabled]) => {
+                if (typeof enabled === 'boolean') upgradePreferences.set(normalizeUpgradeKey(key), enabled);
+            });
+        }
+
+        priorityUpgradeNames = Array.isArray(upgrades.priority)
+            ? upgrades.priority.filter((name) => typeof name === 'string')
+            : [];
+        syncPriorityUpgradeNames();
+        renderUpgradeToggleList();
+        renderUpgradePriorityList();
+        return true;
+    };
+
+    const refreshConfigDropdown = () => {
+        const selectEl = document.getElementById('cfg-select');
+        if (!selectEl) return;
+
+        const names = Object.keys(configProfiles).sort((a, b) => a.localeCompare(b));
+        if (!names.length) {
+            selectEl.innerHTML = '<option value="">No configs saved</option>';
+            selectedProfileName = '';
+            return;
+        }
+
+        if (!selectedProfileName || !configProfiles[selectedProfileName]) selectedProfileName = names[0];
+        selectEl.innerHTML = names.map((name) => {
+            const selected = name === selectedProfileName ? ' selected' : '';
+            return `<option value="${escapeAttr(name)}"${selected}>${name}</option>`;
+        }).join('');
+    };
+
+    const loadProfileByName = (name) => {
+        if (!name || !configProfiles[name]) return false;
+        if (!applyConfigSnapshot(configProfiles[name])) return false;
+        selectedProfileName = name;
+        refreshConfigDropdown();
+        persistProfiles();
+        showConfigStatus(`Loaded: ${name}`);
+        if (applyPendingBotStart) applyPendingBotStart();
+        return true;
+    };
+
+    const exportSelectedProfilePayload = () => {
+        const inputName = sanitizeConfigName(document.getElementById('cfg-name')?.value || '');
+        const profileName = selectedProfileName || inputName || 'Adhoc';
+        return {
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            profileName,
+            snapshot: captureCurrentConfig()
+        };
+    };
+
+    const importProfilesPayload = (payloadText) => {
+        const trimmed = (payloadText || '').trim();
+        if (!trimmed) return { ok: false, reason: 'Paste JSON first.' };
+        let parsed = parseJsonSafe(trimmed);
+        if (!parsed || typeof parsed !== 'object') {
+            return { ok: false, reason: 'Invalid payload.' };
+        }
+
+        if (parsed.snapshot && typeof parsed.snapshot === 'object') {
+            const fallbackName = `Imported ${new Date().toLocaleTimeString()}`;
+            const inputName = sanitizeConfigName(document.getElementById('cfg-name')?.value || '');
+            const payloadName = sanitizeConfigName(parsed.profileName || '');
+            const chosen = payloadName || inputName || selectedProfileName || fallbackName;
+            configProfiles[chosen] = parsed.snapshot;
+            selectedProfileName = chosen;
+            persistProfiles();
+            refreshConfigDropdown();
+            applyConfigSnapshot(configProfiles[chosen]);
+            return { ok: true, reason: `Imported and loaded "${chosen}".` };
+        }
+
+        if (parsed.profiles && typeof parsed.profiles === 'object') {
+            const importedNames = [];
+            Object.entries(parsed.profiles).forEach(([name, snapshot]) => {
+                const cleanName = sanitizeConfigName(name);
+                if (cleanName && snapshot && typeof snapshot === 'object') {
+                    configProfiles[cleanName] = snapshot;
+                    importedNames.push(cleanName);
+                }
+            });
+            let profileToLoad = '';
+            if (typeof parsed.selectedProfile === 'string') {
+                const desired = sanitizeConfigName(parsed.selectedProfile);
+                if (desired && configProfiles[desired]) profileToLoad = desired;
+            }
+            if (!profileToLoad && selectedProfileName && configProfiles[selectedProfileName]) profileToLoad = selectedProfileName;
+            if (!profileToLoad && importedNames.length) profileToLoad = importedNames[0];
+            selectedProfileName = profileToLoad;
+            if (typeof parsed.autoLoad === 'boolean') profileAutoLoadEnabled = parsed.autoLoad;
+            persistProfiles();
+            refreshConfigDropdown();
+            if (profileToLoad) {
+                applyConfigSnapshot(configProfiles[profileToLoad]);
+                return { ok: true, reason: `Imported package and loaded "${profileToLoad}".` };
+            }
+            return { ok: true, reason: 'Imported profile package.' };
+        }
+
+        if (parsed.toggles && typeof parsed.toggles === 'object') {
+            const fallbackName = `Imported ${new Date().toLocaleTimeString()}`;
+            const inputName = sanitizeConfigName(document.getElementById('cfg-name')?.value || '');
+            const chosen = inputName || fallbackName;
+            configProfiles[chosen] = parsed;
+            selectedProfileName = chosen;
+            persistProfiles();
+            refreshConfigDropdown();
+            applyConfigSnapshot(configProfiles[chosen]);
+            return { ok: true, reason: `Imported and loaded "${chosen}".` };
+        }
+
+        return { ok: false, reason: 'Payload format not recognized.' };
+    };
+
+    const getZoneState = () => {
+        const charter = document.querySelector('.zone-charter');
+        const charterBtn = getReadyCharterButton();
+        const steps = charter ? Array.from(charter.querySelectorAll('.charter-steps > div')) : [];
+        const fishdexText = steps[0]?.querySelector('strong')?.textContent?.trim() || '';
+        const fishdexProgress = parseFraction(fishdexText);
+        const fishdexDone = steps[0]?.classList.contains('done') || (!!fishdexProgress && fishdexProgress.current === fishdexProgress.max);
+        const feeDone = !!steps[1]?.classList.contains('done');
+        const ready = !!charterBtn;
+        return {
+            charter,
+            charterBtn,
+            fishdexDone,
+            feeDone,
+            ready,
+            saveForFee: fishdexDone && !feeDone
+        };
+    };
+
+    const getZoneListState = () => {
+        const zoneCards = Array.from(document.querySelectorAll('.zone-card'));
+        if (!zoneCards.length) {
+            return {
+                hasData: false,
+                currentZone: '--',
+                nextZone: '--',
+                isBestZone: false,
+                shouldMoveToBest: false,
+                bestCard: null
+            };
+        }
+
+        const readZoneName = (card) => card?.querySelector('.nm')?.textContent?.trim() || '--';
+        const currentIndex = zoneCards.findIndex((card) => {
+            if (card.classList.contains('current')) return true;
+            const badgeText = card.querySelector('.badge')?.textContent || '';
+            return normalizeText(badgeText) === 'HERE';
+        });
+
+        if (currentIndex < 0) {
+            return {
+                hasData: false,
+                currentZone: '--',
+                nextZone: '--',
+                isBestZone: false,
+                shouldMoveToBest: false,
+                bestCard: null
+            };
+        }
+
+        const currentCard = zoneCards[currentIndex];
+        const bestIndex = zoneCards.reduce((best, card, index) => {
+            if (!isVisible(card) || card.disabled || card.classList.contains('locked')) return best;
+            return index > best ? index : best;
+        }, currentIndex);
+        const bestCard = zoneCards[bestIndex] || currentCard;
+        const currentZone = readZoneName(currentCard);
+        const nextZone = bestIndex > currentIndex ? readZoneName(bestCard) : 'MAX ZONE';
+        const isBestZone = bestIndex <= currentIndex;
+
+        return {
+            hasData: true,
+            currentZone,
+            nextZone,
+            isBestZone,
+            shouldMoveToBest: bestIndex > currentIndex,
+            bestCard
+        };
+    };
+
+    const updateZoneTrackerUi = (state) => {
+        const currentEl = document.getElementById('zone-current-label');
+        const nextEl = document.getElementById('zone-next-label');
+        const statusEl = document.getElementById('zone-best-label');
+        if (!currentEl || !nextEl || !statusEl) return;
+
+        if (!state || !state.hasData) {
+            currentEl.textContent = 'Current: --';
+            nextEl.textContent = 'Next: --';
+            statusEl.textContent = 'Status: waiting for Waters tab';
+            return;
+        }
+
+        currentEl.textContent = `Current: ${state.currentZone}`;
+        nextEl.textContent = `Next: ${state.nextZone}`;
+        statusEl.textContent = state.isBestZone
+            ? 'Status: best available zone'
+            : 'Status: better unlocked zone found';
+    };
+
+    const canUiAct = () => Date.now() >= nextUiActionAt;
+
+    const svgToPngBlob = (svgEl, targetWidth = 480) => new Promise((resolve) => {
+        if (!svgEl) return resolve(null);
+        const vb = svgEl.viewBox?.baseVal;
+        if (!vb || !vb.width) return resolve(null);
+        const aspect = vb.height / vb.width;
+        const padH = Math.round(targetWidth * 0.14);
+        const padV = Math.round(targetWidth * 0.18);
+        const fishW = targetWidth - padH * 2;
+        const fishH = Math.round(fishW * aspect);
+        const canvasW = targetWidth;
+        const canvasH = fishH + padV * 2;
+        const clone = svgEl.cloneNode(true);
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = canvasW;
+            canvas.height = canvasH;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = false;
+            ctx.fillStyle = '#0e1c24';
+            ctx.fillRect(0, 0, canvasW, canvasH);
+            ctx.strokeStyle = '#132430';
+            ctx.lineWidth = 1;
+            for (let x = 0; x <= canvasW; x += 8) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvasH);
+                ctx.stroke();
+            }
+            for (let y = 0; y <= canvasH; y += 8) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvasW, y);
+                ctx.stroke();
+            }
+            ctx.drawImage(img, padH, padV, fishW, fishH);
+            canvas.toBlob((blob) => {
+                URL.revokeObjectURL(img.src);
+                resolve(blob);
+            }, 'image/png');
+        };
+        img.onerror = () => resolve(null);
+        img.src = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml;charset=utf-8' }));
+    });
+
+    const RARITY_COLOR = {
+        common: 0x9da29d,
+        uncommon: 0x6fb07f,
+        rare: 0x5b8dd6,
+        epic: 0xa66fcc,
+        legendary: 0xe8b547,
+        mythic: 0xff5555
+    };
+    const RARITY_EMOJI = {
+        common: '[C]',
+        uncommon: '[U]',
+        rare: '[R]',
+        epic: '[E]',
+        legendary: '[L]',
+        mythic: '[M]'
+    };
+    const RARITY_BAR = {
+        common: '.......... COMMON',
+        uncommon: '##........ UNCOMMON',
+        rare: '####...... RARE',
+        epic: '######.... EPIC',
+        legendary: '#########. LEGENDARY',
+        mythic: '########## MYTHIC'
+    };
+
+    const sendWebhook = async (fishName, rarity, weight, coins, odds, svgEl = null, isTest = false) => {
+        const url = document.getElementById('webhook-url').value.trim();
+        if (!url) return;
+
+        const key = rarity.toLowerCase();
+        const pngBlob = !isTest && svgEl ? await svgToPngBlob(svgEl) : null;
+        const embed = isTest ? {
+            title: 'Webhook connected',
+            description: '```\nCHIYO ULTRA -> DISCORD\n======================\nOK signal established\n```',
+            color: 0x6fb07f,
+            footer: { text: 'Chiyo Ultra' },
+            timestamp: new Date().toISOString()
+        } : {
+            title: `${RARITY_EMOJI[key] || '[?]'} ${rarity.toUpperCase()} CATCH`,
+            description: `### ${fishName}\n\`\`\`\n${RARITY_BAR[key] || ''}\n\`\`\``,
+            color: RARITY_COLOR[key] || 0xe8b547,
+            fields: [
+                { name: 'Weight', value: `\`\`${weight || '-'}\`\``, inline: true },
+                { name: 'Coins', value: `\`\`${coins || '-'}\`\``, inline: true },
+                ...(odds ? [{ name: 'Chance', value: `\`\`${odds}\`\``, inline: true }] : [])
+            ],
+            ...(pngBlob ? { image: { url: 'attachment://fish.png' } } : {}),
+            footer: { text: 'Chiyo Ultra' },
+            timestamp: new Date().toISOString()
+        };
+
+        const payload = { username: 'Chiyo Ultra', embeds: [embed] };
+        const statusEl = document.getElementById('wh-status');
+        try {
+            let response;
+            if (pngBlob) {
+                const formData = new FormData();
+                formData.append('payload_json', JSON.stringify(payload));
+                formData.append('files[0]', pngBlob, 'fish.png');
+                response = await fetch(url, { method: 'POST', body: formData });
+            } else {
+                response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+            }
+            const ok = response.ok || response.status === 204;
+            statusEl.textContent = ok ? 'OK sent' : `ERR ${response.status}`;
+            statusEl.className = `c-wh-status ${ok ? 'ok' : 'err'}`;
+        } catch (error) {
+            statusEl.textContent = `ERR ${error.message}`;
+            statusEl.className = 'c-wh-status err';
+        }
+        statusEl.style.display = 'block';
+        setTimeout(() => {
+            statusEl.style.display = 'none';
+        }, 4500);
+    };
+
+    const sentToasts = new WeakSet();
+    const processedBlockedToasts = new WeakSet();
+    const isBlockedActionToast = (node) => {
+        const name = normalizeText(node.querySelector('.name')?.textContent || '');
+        const meta = normalizeText(node.querySelector('.meta')?.textContent || '');
+        return name.includes('ACTION BLOCKED') && meta.includes('THAT ACTION IS NOT ALLOWED');
+    };
+    const recordBlockedActionToast = () => {
+        if (!toastWatchdogEnabled) return;
+        const now = Date.now();
+        blockedActionToastTimes = blockedActionToastTimes.filter((time) => now - time <= TOAST_WATCHDOG_WINDOW_MS);
+        blockedActionToastTimes.push(now);
+        if (blockedActionToastTimes.length < TOAST_WATCHDOG_LIMIT) return;
+
+        const lastReload = Number(localStorage.getItem(TOAST_WATCHDOG_RELOAD_KEY) || '0');
+        if (Number.isFinite(lastReload) && now - lastReload < TOAST_WATCHDOG_WINDOW_MS) return;
+        localStorage.setItem(TOAST_WATCHDOG_RELOAD_KEY, String(now));
+        setStatus('ACTION BLOCKED', 'auto');
+        setTimeout(() => window.location.reload(), 250);
+    };
+    const handleToastNode = (node) => {
+        if (!node?.classList?.contains('toast')) return;
+
+        if (!processedBlockedToasts.has(node)) {
+            processedBlockedToasts.add(node);
+            if (isBlockedActionToast(node)) recordBlockedActionToast();
+        }
+
+        if (!webhookEnabled || sentToasts.has(node)) return;
+        sentToasts.add(node);
+        const tag = node.querySelector('.rarity-tag');
+        const name = node.querySelector('.name');
+        const meta = node.querySelector('.meta');
+        if (!tag || !name) return;
+
+        const rarity = tag.textContent.trim().toLowerCase();
+        const notify = {
+            rare: document.getElementById('notify-rare')?.checked,
+            epic: document.getElementById('notify-epic')?.checked,
+            legendary: document.getElementById('notify-legendary')?.checked,
+            mythic: document.getElementById('notify-mythic')?.checked
+        };
+        if (!notify[rarity]) return;
+
+        const fishName = [...name.childNodes]
+            .filter((child) => child.nodeType === 3)
+            .map((child) => child.textContent.trim())
+            .join('') || name.textContent.trim();
+
+        const metaChildren = meta ? [...meta.children] : [];
+        const weight = metaChildren[0]?.textContent.trim() || '';
+        const coins = metaChildren[1]?.textContent.trim() || '';
+        const odds = metaChildren[2]?.textContent.trim() || '';
+        sendWebhook(fishName, rarity, weight, coins, odds, node.querySelector('svg'));
+    };
+    toastObserver = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => mutation.addedNodes.forEach((node) => {
+            if (node.nodeType !== 1) return;
+            handleToastNode(node);
+            node.querySelectorAll?.('.toast').forEach(handleToastNode);
+        }));
+    });
+    toastObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+
+    const runCleanSequence = async () => {
+        isCleaning = true;
+        cleanMenuRequested = false;
+        setStatus('CLEANING', 'on');
+
+        const scrub = () => document.querySelector('.cleaning-scrub');
+
+        const clickStage = async (delay) => {
+            if (delay > 0) await sleep(delay);
+            const button = scrub();
+            if (!button) return false;
+            button.click();
+            await nextFrame();
+            return true;
+        };
+
+        try {
+            if (!(await clickStage(CLEAN_DELAYS.start))) return;
+            if (!(await clickStage(CLEAN_DELAYS.h2))) return;
+            if (!(await clickStage(CLEAN_DELAYS.h3))) return;
+            await clickStage(CLEAN_DELAYS.h4);
+        } finally {
+            isCleaning = false;
+        }
+    };
+
+    const castLoop = () => {
+        if (!isRunning) return;
+        const now = Date.now();
+        const isMinigame = !!document.querySelector('.cleaning-card, .cleaning-scrub, .fishing-reel');
+        if (isMinigame) return;
+        const castState = getCastButtonState();
+        if (castState.busy) castProgressStalledSince = 0;
+        if (castWaitingForReady) {
+            if (castState.busy) castSawBusy = true;
+            if (castState.ready && (castSawBusy || now - lastCastClickAt >= CAST_READY_FALLBACK_MS)) {
+                castWaitingForReady = false;
+                castSawBusy = false;
+                nextCastAttemptAt = Math.max(nextCastAttemptAt, now + currentSpeed);
+            } else if (now - lastCastClickAt >= CAST_LOCK_TIMEOUT_MS) {
+                castWaitingForReady = false;
+                castSawBusy = false;
+                nextCastAttemptAt = now + currentSpeed;
+            }
+            return;
+        }
+        if (!castState.ready || !castState.button || now < nextCastAttemptAt) return;
+        castState.button.click();
+        castWaitingForReady = true;
+        castSawBusy = false;
+        lastCastClickAt = now;
+        nextCastAttemptAt = now + currentSpeed;
+    };
+
+    const mainLoop = () => {
+        if (!isRunning) return;
+
+        const now = Date.now();
+        const cleaningCard = document.querySelector('.cleaning-card');
+        const scrubButton = getCleaningScrubButton();
+        const cleanHookButton = getCleanHookButton();
+        const bossTargetButton = getBossTargetButton();
+        const confirmRebirthButton = getConfirmRebirthButton();
+        const isMinigame = !!document.querySelector('.cleaning-card, .cleaning-scrub, .fishing-reel');
+
+        if (cleaningCard || scrubButton) {
+            cleanMenuRequested = false;
+        } else if (cleanMenuRequested && now - cleanMenuRequestedAt > CLEAN_OPEN_RETRY_MS) {
+            cleanMenuRequested = false;
+        }
+
+        if (cleanMenuRequested && !cleaningCard && !scrubButton) {
+            setStatus('WAITING CLEAN', 'on');
+            return;
+        }
+
+        if (autoBoss && bossTargetButton) {
+            setStatus('BOSS TARGET', 'auto');
+            bossTargetButton.click();
+            return;
+        }
+
+        if (autoRebirth && confirmRebirthButton && (!rebirthNeedsWantedPets || areWantedPetsEquipped())) {
+            setStatus('CONFIRM REBIRTH', 'auto');
+            confirmRebirthButton.click();
+            nextUiActionAt = now + 1200;
+            queueWatersCheckAfterRebirth(now);
+            return;
+        } else if (autoRebirth && confirmRebirthButton && rebirthNeedsWantedPets) {
+            setStatus('WAITING PETS', 'auto');
+            updatePetUi('Rebirth confirm is blocked until wanted pets are equipped');
+            return;
+        }
+
+        if (autoSell) {
+            const invState = getInventoryState();
+            const sellBtn = document.querySelector('.inv-bar .sell');
+            if (sellBtn && !sellBtn.disabled) {
+                const target = getSellThresholdTarget(invState?.max || 0);
+                const shouldSell = invState
+                    ? invState.current >= target
+                    : !!document.querySelector('.inv-bar.full');
+                if (shouldSell) {
+                    setStatus('SELLING', 'sell');
+                    sellBtn.click();
+                    return;
+                }
+            }
+        }
+
+        if (autoClean && (cleaningCard || scrubButton) && !isCleaning) {
+            runCleanSequence();
+            return;
+        }
+
+        if (!isMinigame) {
+            const tryRebirthAutomation = () => {
+                if (!autoRebirth || now < nextRebirthCheckAt || !canUiAct()) return false;
+                if (rebirthNeedsWantedPets && !areWantedPetsEquipped()) {
+                    if (isZoneSpendingPaused()) {
+                        nextRebirthCheckAt = now + 1000;
+                        setStatus('WAITING PETS', 'auto');
+                        updatePetUi('Rebirth blocked until wanted pets are equipped');
+                        return false;
+                    }
+                    if (desiredPetNames.length && !isSidebarTabActive('Pets')) {
+                        if (openSidebarTab('Pets')) {
+                            setStatus('CHECKING PETS', 'auto');
+                            updatePetUi('Checking equipped pets before rebirth');
+                            nextUiActionAt = now + TAB_OPEN_DELAY_MS;
+                            return true;
+                        }
+                    }
+                    refreshPetDiscovery();
+                    nextRebirthCheckAt = now + 1000;
+                    setStatus('WAITING PETS', 'auto');
+                    updatePetUi('Rebirth blocked until wanted pets are equipped');
+                    return false;
+                }
+                if (!isSidebarTabActive('Rebirth')) {
+                    if (openSidebarTab('Rebirth')) {
+                        setStatus('CHECKING REBIRTH', 'auto');
+                        nextUiActionAt = now + TAB_OPEN_DELAY_MS;
+                        return true;
+                    }
+                    return false;
+                }
+                const rebirthBtn = getRebirthButton();
+                nextRebirthCheckAt = now + REBIRTH_CHECK_INTERVAL_MS;
+                if (rebirthBtn) {
+                    setStatus('REBIRTHING', 'auto');
+                    rebirthBtn.click();
+                    nextUiActionAt = now + 1200;
+                    queueWatersCheckAfterRebirth(now);
+                    return true;
+                }
+                return false;
+            };
+
+            const tryZoneAutomation = () => {
+                if (!autoZone || now < nextZoneCheckAt || !canUiAct()) return false;
+                if (!isSidebarTabActive('Waters')) {
+                    if (openSidebarTab('Waters')) {
+                        setStatus('CHECKING ZONE', 'auto');
+                        nextUiActionAt = now + TAB_OPEN_DELAY_MS;
+                        return true;
+                    }
+                    return false;
+                }
+                const zoneState = getZoneState();
+                const zoneListState = getZoneListState();
+                updateZoneTrackerUi(zoneListState);
+                saveForZone = zoneState.saveForFee;
+                if (zoneListState.shouldMoveToBest && zoneListState.bestCard) {
+                    setStatus('MOVING ZONE', 'auto');
+                    zoneListState.bestCard.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+                    zoneListState.bestCard.click();
+                    nextZoneCheckAt = 0;
+                    nextUiActionAt = now + ZONE_ACTION_DELAY_MS;
+                    return true;
+                }
+                if (zoneState.ready && zoneState.charterBtn) {
+                    setStatus('CHARTERING', 'auto');
+                    saveForZone = false;
+                    zoneState.charterBtn.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+                    zoneState.charterBtn.click();
+                    nextZoneCheckAt = 0;
+                    nextUiActionAt = now + ZONE_ACTION_DELAY_MS;
+                    return true;
+                }
+                if (saveForZone) setStatus('SAVING FOR ZONE', 'auto');
+                nextZoneCheckAt = now + ZONE_CHECK_INTERVAL_MS;
+                return false;
+            };
+
+            const tryUpgradeAutomation = () => {
+                if (!autoUpgrades || !canUiAct() || isZoneSpendingPaused()) return false;
+                if (now < nextUpgradeActionAt) return false;
+                if (!isSidebarTabActive('Upgrade') && now < nextUpgradeCheckAt) return false;
+                if (!isSidebarTabActive('Upgrade')) {
+                    if (openSidebarTab('Upgrade')) {
+                        setStatus('OPENING UPGRADES', 'auto');
+                        nextUiActionAt = now + TAB_OPEN_DELAY_MS;
+                        return true;
+                    }
+                    return false;
+                }
+                const buyBtn = getAffordableUpgradeButton();
+                if (buyBtn) {
+                    setStatus('BUYING UPGRADE', 'auto');
+                    buyBtn.click();
+                    nextUiActionAt = now + UPGRADE_BUY_ACTION_DELAY_MS;
+                    nextUpgradeActionAt = now + UPGRADE_BUY_ACTION_DELAY_MS;
+                    return true;
+                }
+                nextUpgradeCheckAt = now + UPGRADE_CHECK_INTERVAL_MS;
+                return false;
+            };
+
+            const tryItemAutomation = () => {
+                const shouldRunItems = autoItems || autoItemUse;
+                if (!shouldRunItems || !canUiAct()) return false;
+                if (now < nextItemActionAt) return false;
+                const statusEl = document.getElementById('item-status-label');
+                if (!isSidebarTabActive('Items') && now < nextItemCheckAt) return false;
+                if (!isSidebarTabActive('Items')) {
+                    if (openSidebarTab('Items')) {
+                        if (statusEl) statusEl.textContent = 'Opening Items tab';
+                        setStatus('OPENING ITEMS', 'auto');
+                        nextUiActionAt = now + TAB_OPEN_DELAY_MS;
+                        return true;
+                    }
+                    return false;
+                }
+                const targetSegmentBtn = getItemsSegmentButton(itemSegmentMode);
+                if (targetSegmentBtn && !targetSegmentBtn.classList.contains('active')) {
+                    targetSegmentBtn.click();
+                    if (statusEl) statusEl.textContent = `Switching to ${itemSegmentMode} segment`;
+                    setStatus('ITEMS SEGMENT', 'auto');
+                    nextUiActionAt = now + 250;
+                    return true;
+                }
+                renderItemChoiceList();
+
+                if (autoItemUse) {
+                    const useCandidate = getAutoItemUseCandidate();
+                    if (useCandidate) {
+                        useCandidate.button.click();
+                        if (statusEl) {
+                            statusEl.textContent = useCandidate.mode === 'all'
+                                ? `Using all: ${useCandidate.name}`
+                                : `Using one: ${useCandidate.name}`;
+                        }
+                        setStatus('USING ITEM', 'auto');
+                        nextUiActionAt = now + ITEM_USE_ACTION_DELAY_MS;
+                        nextItemActionAt = now + ITEM_USE_ACTION_DELAY_MS;
+                        return true;
+                    }
+                }
+
+                if (autoItems && !isZoneSpendingPaused()) {
+                    const buyCandidate = getAutoItemBuyCandidate();
+                    if (buyCandidate) {
+                        buyCandidate.button.click();
+                        if (statusEl) {
+                            statusEl.textContent = buyCandidate.mode === 'max'
+                                ? `Buying max: ${buyCandidate.name}`
+                                : `Buying one: ${buyCandidate.name}`;
+                        }
+                        setStatus(buyCandidate.mode === 'max' ? 'BUYING MAX' : 'BUYING ITEM', 'auto');
+                        nextUiActionAt = now + ITEM_BUY_ACTION_DELAY_MS;
+                        nextItemActionAt = now + ITEM_BUY_ACTION_DELAY_MS;
+                        return true;
+                    }
+                }
+
+                if (statusEl) {
+                    statusEl.textContent = isZoneSpendingPaused()
+                        ? 'Paused while saving for zone'
+                        : (autoItems ? 'No usable/buyable items right now' : 'No usable owned items right now');
+                }
+                nextItemCheckAt = now + ITEM_CHECK_INTERVAL_MS;
+                return false;
+            };
+
+            const tryPetAutomation = () => {
+                const shouldRunPets = autoPets || autoPetClaim || autoPetUpgrades || autoPetEggs || autoPetEquip;
+                if (!shouldRunPets || !canUiAct()) return false;
+                if (!isSidebarTabActive('Pets') && now < nextPetCheckAt) return false;
+                if (!isSidebarTabActive('Pets')) {
+                    if (openSidebarTab('Pets')) {
+                        updatePetUi('Opening Pets tab');
+                        setStatus('OPENING PETS', 'auto');
+                        nextUiActionAt = now + TAB_OPEN_DELAY_MS;
+                        return true;
+                    }
+                    return false;
+                }
+                refreshPetDiscovery();
+                renderPetChoiceLists();
+
+                const petLicenseBtn = getPetLicenseBuyButton();
+                if (petLicenseBtn && (autoPetUpgrades || autoPetEggs || autoPetEquip)) {
+                    petLicenseBtn.click();
+                    updatePetUi('Buying Pet License');
+                    setStatus('BUY PET LICENSE', 'auto');
+                    nextUiActionAt = now + 250;
+                    return true;
+                }
+
+                if (autoPetClaim) {
+                    const collectBtn = getReadyPetCollectButton();
+                    if (collectBtn) {
+                        const slot = collectBtn.closest('.hatch-slot');
+                        lastEggCollectSignature = normalizeText(slot?.querySelector('.slot-top')?.textContent || slot?.textContent || collectBtn.textContent || '');
+                        lastEggCollectAt = now;
+                        collectBtn.click();
+                        updatePetUi('Collecting ready egg');
+                        setStatus('COLLECT PET', 'auto');
+                        nextUiActionAt = now + EGG_COLLECT_REPEAT_GUARD_MS;
+                        return true;
+                    }
+                }
+
+                if (autoPetEquip) {
+                    const equipCandidate = getAutoPetEquipCandidate();
+                    if (equipCandidate) {
+                        equipCandidate.button.click();
+                        updatePetUi(equipCandidate.mode === 'unequip'
+                            ? `Making room: ${equipCandidate.name}`
+                            : `Equipping: ${equipCandidate.name}`);
+                        setStatus(equipCandidate.mode === 'unequip' ? 'UNEQUIP PET' : 'EQUIP PET', 'auto');
+                        nextUiActionAt = now + 500;
+                        return true;
+                    }
+                }
+
+                if (autoPetEggs) {
+                    const hatchCandidate = getPetEggHatchCandidate();
+                    if (hatchCandidate) {
+                        hatchCandidate.button.click();
+                        updatePetUi(`Hatching: ${hatchCandidate.name}`);
+                        setStatus('HATCH EGG', 'auto');
+                        nextUiActionAt = now + 500;
+                        return true;
+                    }
+
+                    const buyCandidate = !isZoneSpendingPaused() ? getPetEggBuyCandidate() : null;
+                    if (buyCandidate) {
+                        buyCandidate.button.click();
+                        updatePetUi(`Buying ${buyCandidate.name} for ${buyCandidate.openSlots} open slot(s)`);
+                        setStatus('BUY EGG', 'auto');
+                        nextUiActionAt = now + 500;
+                        return true;
+                    }
+                }
+
+                if (autoPetUpgrades && now >= nextPetUpgradeActionAt) {
+                    const petUpgrade = getPetUpgradeBuyButton();
+                    if (petUpgrade) {
+                        petUpgrade.button.click();
+                        updatePetUi(`Buying pet upgrade: ${petUpgrade.name}`);
+                        setStatus('BUY PET UPGRADE', 'auto');
+                        nextUiActionAt = now + PET_UPGRADE_BUY_ACTION_DELAY_MS;
+                        nextPetUpgradeActionAt = now + PET_UPGRADE_BUY_ACTION_DELAY_MS;
+                        return true;
+                    }
+                }
+
+                if (rebirthNeedsWantedPets && !areWantedPetsEquipped()) {
+                    updatePetUi('Wanted pets are not all equipped yet');
+                } else {
+                    updatePetUi(isZoneSpendingPaused() ? 'Paused while saving for zone' : 'No pet action ready');
+                }
+                nextPetCheckAt = now + PET_CHECK_INTERVAL_MS;
+                return false;
+            };
+
+            const taskRunners = {
+                rebirth: tryRebirthAutomation,
+                zone: tryZoneAutomation,
+                upgrades: tryUpgradeAutomation,
+                items: tryItemAutomation,
+                pets: tryPetAutomation
+            };
+
+            const taskEnabled = {
+                rebirth: () => autoRebirth && (!isZoneSpendingPaused() || rebirthWhileSavingZone),
+                zone: () => autoZone,
+                upgrades: () => autoUpgrades && !isZoneSpendingPaused(),
+                items: () => !isZoneSpendingPaused() && (autoItems || autoItemUse),
+                pets: () => !isZoneSpendingPaused() && (autoPets || autoPetClaim || autoPetUpgrades || autoPetEggs || autoPetEquip)
+            };
+            const findEnabledTaskIndex = (startIndex) => {
+                for (let offset = 0; offset < AUTOMATION_TASKS.length; offset += 1) {
+                    const index = (startIndex + offset) % AUTOMATION_TASKS.length;
+                    const taskName = AUTOMATION_TASKS[index];
+                    if (taskEnabled[taskName]?.()) return index;
+                }
+                return -1;
+            };
+
+            const currentTaskName = AUTOMATION_TASKS[automationTaskIndex];
+            const dwellExpired = automationTaskStartedAt > 0 && now - automationTaskStartedAt >= AUTOMATION_TAB_DWELL_MS;
+            const hardDwellExpired = automationTaskHardStartedAt > 0 && now - automationTaskHardStartedAt >= AUTOMATION_TAB_MAX_DWELL_MS;
+            const needsNewTask = !automationTaskStartedAt || dwellExpired || hardDwellExpired || !taskEnabled[currentTaskName]?.();
+            if (needsNewTask) {
+                const startIndex = (dwellExpired || hardDwellExpired) ? automationTaskIndex + 1 : automationTaskIndex;
+                const nextIndex = findEnabledTaskIndex(startIndex);
+                if (nextIndex < 0) return;
+                automationTaskIndex = nextIndex;
+                automationTaskStartedAt = now;
+                automationTaskHardStartedAt = now;
+            }
+
+            const taskName = AUTOMATION_TASKS[automationTaskIndex];
+            try {
+                const acted = taskRunners[taskName]();
+                if (acted) {
+                    const actionHardExpired = automationTaskHardStartedAt > 0 && now - automationTaskHardStartedAt >= AUTOMATION_TAB_MAX_DWELL_MS;
+                    if (actionHardExpired) {
+                        automationTaskIndex = (automationTaskIndex + 1) % AUTOMATION_TASKS.length;
+                        automationTaskStartedAt = 0;
+                        automationTaskHardStartedAt = 0;
+                    } else {
+                        automationTaskStartedAt = now;
+                    }
+                    return;
+                }
+            } catch (error) {
+                console.warn(`[Chiyo Helper] ${taskName} automation failed`, error);
+                setStatus(`${taskName.toUpperCase()} ERROR`, 'auto');
+                automationTaskIndex = (automationTaskIndex + 1) % AUTOMATION_TASKS.length;
+                automationTaskStartedAt = 0;
+                automationTaskHardStartedAt = 0;
+                return;
+            }
+        }
+
+        if (autoClean && !isCleaning && !cleaningCard && !scrubButton) {
+            if (cleanHookButton && !cleanMenuRequested) {
+                cleanMenuRequested = true;
+                cleanMenuRequestedAt = now;
+                setStatus('OPENING CLEAN', 'on');
+                cleanHookButton.click();
+                return;
+            }
+            if (cleanHookButton && cleanMenuRequested) {
+                setStatus('WAITING CLEAN', 'on');
+                return;
+            }
+            if (!cleanHookButton) {
+                cleanMenuRequested = false;
+            }
+        }
+
+        if (autoRepair) {
+            const repairBtn = findButtonByText('REPAIR HOOK');
+            if (repairBtn) {
+                setStatus('REPAIRING', 'on');
+                repairBtn.click();
+                return;
+            }
+        }
+
+        if (isZoneSpendingPaused()) {
+            setStatus('SAVING FOR ZONE', 'auto');
+            return;
+        }
+
+        setStatus('IDLE');
+    };
+
+    const renderLoop = () => {
+        if (isDisposed) return;
+        const now = Date.now();
+        refreshIfServerBlocked();
+        if (now >= nextZoneUiRefreshAt) {
+            updateZoneTrackerUi(getZoneListState());
+            refreshSellThresholdInput();
+            nextZoneUiRefreshAt = now + 500;
+        }
+        if (!isRunning && !isCleaning) setStatus('IDLE');
+        renderFrameId = requestAnimationFrame(renderLoop);
+    };
+    renderFrameId = requestAnimationFrame(renderLoop);
+    serverBlockedInterval = setInterval(refreshIfServerBlocked, 2000);
+    runGameWatchdogCheck();
+    gameWatchdogInterval = setInterval(runGameWatchdogCheck, GAME_WATCHDOG_CHECK_MS);
+    window.addEventListener('online', runGameWatchdogCheck);
+    renderUpgradeToggleList();
+    renderUpgradePriorityList();
+    updateUpgradeBuyModeUi();
+    updateItemBuyModeUi();
+    updateItemSegmentUi();
+    renderItemChoiceList();
+    updatePetUi();
+    renderPetChoiceLists();
+    refreshSellThresholdInput(true);
+    readProfilesFromStorage();
+    selectedProfileName = sanitizeConfigName(localStorage.getItem(ACTIVE_PROFILE_KEY) || '');
+    profileAutoLoadEnabled = localStorage.getItem(AUTOLOAD_PROFILE_KEY) === '1';
+    refreshConfigDropdown();
+    const cfgAutoloadEl = document.getElementById('cfg-autoload');
+    if (cfgAutoloadEl) cfgAutoloadEl.checked = profileAutoLoadEnabled;
+    const autoStartEl = document.getElementById('auto-start-chk');
+    if (autoStartEl) autoStartEl.checked = autoStartBotEnabled;
+    const watchdogEl = document.getElementById('watchdog-chk');
+    if (watchdogEl) watchdogEl.checked = gameWatchdogEnabled;
+    const toastWatchdogEl = document.getElementById('toast-watchdog-chk');
+    if (toastWatchdogEl) toastWatchdogEl.checked = toastWatchdogEnabled;
+    if (profileAutoLoadEnabled && selectedProfileName && configProfiles[selectedProfileName]) {
+        loadProfileByName(selectedProfileName);
+    }
+
+    const stopBotLoops = () => {
+        clearInterval(castInterval);
+        clearInterval(automationInterval);
+        castInterval = null;
+        automationInterval = null;
+        castProgressStalledSince = 0;
+    };
+
+    const cleanupHelper = () => {
+        isDisposed = true;
+        isRunning = false;
+        isCleaning = false;
+        cleanMenuRequested = false;
+        stopBotLoops();
+        if (renderFrameId) cancelAnimationFrame(renderFrameId);
+        if (serverBlockedInterval) clearInterval(serverBlockedInterval);
+        if (gameWatchdogInterval) clearInterval(gameWatchdogInterval);
+        if (toastObserver) toastObserver.disconnect();
+        window.removeEventListener('online', runGameWatchdogCheck);
+        window.removeEventListener('mousemove', handleWindowMouseMove);
+        window.removeEventListener('mouseup', handleWindowMouseUp);
+        gui.remove();
+        if (window[CLEANUP_KEY] === cleanupHelper) {
+            delete window[CLEANUP_KEY];
+        }
+    };
+    window[CLEANUP_KEY] = cleanupHelper;
+
+    const startBotLoops = () => {
+        stopBotLoops();
+        automationTaskIndex = 0;
+        automationTaskStartedAt = 0;
+        automationTaskHardStartedAt = 0;
+        nextUpgradeCheckAt = 0;
+        nextItemCheckAt = 0;
+        nextPetCheckAt = 0;
+        nextZoneCheckAt = 0;
+        nextRebirthCheckAt = 0;
+        nextUpgradeActionAt = 0;
+        nextItemActionAt = 0;
+        nextPetUpgradeActionAt = 0;
+        castWaitingForReady = false;
+        castSawBusy = false;
+        lastCastClickAt = 0;
+        nextCastAttemptAt = 0;
+        castProgressStalledSince = 0;
+        lastEggCollectAt = 0;
+        lastEggCollectSignature = '';
+        castLoop();
+        mainLoop();
+        castInterval = setInterval(castLoop, CAST_LOOP_INTERVAL_MS);
+        automationInterval = setInterval(mainLoop, AUTOMATION_LOOP_MS);
+    };
+
+    const refreshBotToggleButton = () => {
+        const button = gui.querySelector('#toggle-bot');
+        if (!button) return;
+        button.innerText = isRunning ? 'STOP BOT' : "START FISHIN'";
+        button.classList.toggle('on', isRunning);
+    };
+
+    const setBotRunning = (running) => {
+        isRunning = !!running;
+        refreshBotToggleButton();
+        if (isRunning) {
+            startBotLoops();
+        } else {
+            stopBotLoops();
+            isCleaning = false;
+            cleanMenuRequested = false;
+            setStatus('IDLE');
+        }
+    };
+
+    applyPendingBotStart = () => {
+        if (typeof pendingRunningState !== 'boolean') return;
+        const shouldRun = pendingRunningState;
+        pendingRunningState = null;
+        setBotRunning(shouldRun);
+    };
+    applyPendingBotStart();
+    if (autoStartBotEnabled && !isRunning) {
+        setBotRunning(true);
+    }
+
+    gui.querySelector('#toggle-bot').onclick = function () {
+        setBotRunning(!isRunning);
+    };
+    gui.querySelector('#auto-start-chk').onchange = (e) => {
+        autoStartBotEnabled = !!e.target.checked;
+        persistRuntimeToggles();
+    };
+    gui.querySelector('#watchdog-chk').onchange = (e) => {
+        gameWatchdogEnabled = !!e.target.checked;
+        castMissingSince = 0;
+        castProgressStalledSince = 0;
+        persistRuntimeToggles();
+    };
+    gui.querySelector('#toast-watchdog-chk').onchange = (e) => {
+        toastWatchdogEnabled = !!e.target.checked;
+        blockedActionToastTimes = [];
+        persistRuntimeToggles();
+    };
+
+    gui.querySelector('#delay-slide').oninput = (e) => {
+        currentSpeed = Number(e.target.value);
+        gui.querySelector('#delay-val').innerText = `${(currentSpeed / 1000).toFixed(1)}s`;
+        nextCastAttemptAt = Math.min(nextCastAttemptAt || Date.now(), Date.now() + currentSpeed);
+    };
+
+    gui.querySelector('#repair-chk').onchange = (e) => { autoRepair = e.target.checked; };
+    gui.querySelector('#clean-chk').onchange = (e) => { autoClean = e.target.checked; };
+    gui.querySelector('#sell-chk').onchange = (e) => { autoSell = e.target.checked; };
+    const sellThresholdEl = gui.querySelector('#sell-threshold');
+    const updateSellThresholdFromInput = (rawValue) => {
+        const parsed = Number(rawValue);
+        if (!Number.isFinite(parsed)) return;
+        const inventoryMax = getInventoryState()?.max || 9999;
+        autoSellThreshold = Math.max(0, Math.min(inventoryMax, Math.floor(parsed)));
+        if (sellThresholdEl) sellThresholdEl.value = String(autoSellThreshold);
+        refreshSellThresholdInput();
+    };
+    if (sellThresholdEl) {
+        sellThresholdEl.oninput = (event) => updateSellThresholdFromInput(event.target.value);
+        sellThresholdEl.onchange = (event) => updateSellThresholdFromInput(event.target.value);
+        sellThresholdEl.onclick = () => refreshSellThresholdInput();
+        sellThresholdEl.onfocus = () => refreshSellThresholdInput();
+    }
+    gui.querySelector('#upgrade-chk').onchange = (e) => {
+        autoUpgrades = e.target.checked;
+        nextUpgradeCheckAt = 0;
+    };
+    gui.querySelector('#upgrade-buy-mode').onchange = (e) => {
+        const mode = String(e.target.value || '');
+        if (mode === 'buy' || mode === 'max') {
+            upgradeBuyMode = mode;
+            nextUpgradeCheckAt = 0;
+            updateUpgradeBuyModeUi();
+        }
+    };
+    gui.querySelector('#item-chk').onchange = (e) => {
+        autoItems = e.target.checked;
+        nextItemCheckAt = 0;
+    };
+    gui.querySelector('#item-use-chk').onchange = (e) => {
+        autoItemUse = e.target.checked;
+        nextItemCheckAt = 0;
+    };
+    gui.querySelector('#item-segment').onchange = (e) => {
+        const value = normalizeText(e.target.value || '');
+        if (value === 'TACKLE' || value === 'ENCHANT' || value === 'KITCHEN') {
+            itemSegmentMode = value;
+            updateItemSegmentUi();
+        }
+    };
+    gui.querySelector('#item-buy-one').onclick = () => {
+        autoItemBuyMode = 'one';
+        nextItemCheckAt = 0;
+        updateItemBuyModeUi();
+    };
+    gui.querySelector('#item-buy-max').onclick = () => {
+        autoItemBuyMode = 'max';
+        nextItemCheckAt = 0;
+        updateItemBuyModeUi();
+    };
+    gui.querySelector('#item-dropdown-toggle').onclick = () => {
+        itemDropdownOpen = !itemDropdownOpen;
+        renderItemChoiceList();
+    };
+    gui.querySelector('#item-search').oninput = (e) => {
+        itemSearchQuery = e.target.value;
+        renderItemChoiceList();
+    };
+    gui.querySelector('#items-all-on').onclick = () => syncManagedItemNames(getVisibleItemNames());
+    gui.querySelector('#items-clear').onclick = () => syncManagedItemNames([]);
+    const itemActiveThresholdEl = gui.querySelector('#item-active-threshold');
+    if (itemActiveThresholdEl) {
+        itemActiveThresholdEl.oninput = (e) => {
+            const parsed = Number(e.target.value);
+            itemActiveThreshold = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+        };
+    }
+    gui.querySelector('#pet-chk').onchange = (e) => {
+        autoPets = e.target.checked;
+        nextPetCheckAt = 0;
+    };
+    gui.querySelector('#pet-claim-chk').onchange = (e) => {
+        autoPetClaim = e.target.checked;
+        nextPetCheckAt = 0;
+    };
+    gui.querySelector('#pet-upgrades-chk').onchange = (e) => {
+        autoPetUpgrades = e.target.checked;
+        nextPetCheckAt = 0;
+    };
+    gui.querySelector('#pet-eggs-chk').onchange = (e) => {
+        autoPetEggs = e.target.checked;
+        nextPetCheckAt = 0;
+    };
+    gui.querySelector('#pet-equip-chk').onchange = (e) => {
+        autoPetEquip = e.target.checked;
+        nextPetCheckAt = 0;
+    };
+    gui.querySelector('#pet-egg-dropdown-toggle').onclick = () => {
+        petEggDropdownOpen = !petEggDropdownOpen;
+        renderPetChoiceLists();
+    };
+    gui.querySelector('#pet-wanted-dropdown-toggle').onclick = () => {
+        petWantedDropdownOpen = !petWantedDropdownOpen;
+        renderPetChoiceLists();
+    };
+    gui.querySelector('#pet-egg-search').oninput = (e) => {
+        petEggSearchQuery = e.target.value;
+        renderPetChoiceList('egg');
+        updatePetDropdownSummaries();
+    };
+    gui.querySelector('#pet-wanted-search').oninput = (e) => {
+        petWantedSearchQuery = e.target.value;
+        renderPetChoiceList('pet');
+        updatePetDropdownSummaries();
+    };
+    gui.querySelector('#pet-eggs-all-on').onclick = () => syncSelectedNames('egg', getVisibleEggNames());
+    gui.querySelector('#pet-eggs-all-off').onclick = () => syncSelectedNames('egg', []);
+    gui.querySelector('#pet-wanted-all-on').onclick = () => syncSelectedNames('pet', getSelectableWantedPetNames());
+    gui.querySelector('#pet-wanted-all-off').onclick = () => syncSelectedNames('pet', []);
+    gui.querySelector('#upgrade-dropdown-toggle').onclick = () => {
+        upgradesDropdownOpen = !upgradesDropdownOpen;
+        updateUpgradeDropdownSummary();
+    };
+    gui.querySelector('#priority-dropdown-toggle').onclick = () => {
+        priorityDropdownOpen = !priorityDropdownOpen;
+        updatePriorityDropdownSummary();
+    };
+    gui.querySelector('#upgrades-all-on').onclick = () => setAllUpgradePreferences(true);
+    gui.querySelector('#upgrades-all-off').onclick = () => setAllUpgradePreferences(false);
+    gui.querySelector('#upgrades-refresh').onclick = () => {
+        if (!isSidebarTabActive('Upgrade')) {
+            openSidebarTab('Upgrade');
+            setTimeout(() => {
+                renderUpgradeToggleList();
+                renderUpgradePriorityList();
+            }, 350);
+            return;
+        }
+        renderUpgradeToggleList();
+        renderUpgradePriorityList();
+    };
+    gui.querySelector('#zone-chk').onchange = (e) => {
+        autoZone = e.target.checked;
+        nextZoneCheckAt = 0;
+        if (!autoZone) saveForZone = false;
+    };
+    gui.querySelector('#zone-save-pause-chk').onchange = (e) => {
+        pauseSpendingForZone = e.target.checked;
+        nextZoneCheckAt = 0;
+        nextUpgradeCheckAt = 0;
+        nextItemCheckAt = 0;
+        nextPetCheckAt = 0;
+        nextRebirthCheckAt = 0;
+        automationTaskStartedAt = 0;
+    };
+    gui.querySelector('#boss-chk').onchange = (e) => { autoBoss = e.target.checked; };
+    gui.querySelector('#rebirth-chk').onchange = (e) => {
+        autoRebirth = e.target.checked;
+        nextRebirthCheckAt = 0;
+    };
+    gui.querySelector('#rebirth-pets-ready-chk').onchange = (e) => {
+        rebirthNeedsWantedPets = e.target.checked;
+        nextRebirthCheckAt = 0;
+    };
+    gui.querySelector('#rebirth-save-zone-chk').onchange = (e) => {
+        rebirthWhileSavingZone = e.target.checked;
+        nextRebirthCheckAt = 0;
+    };
+    gui.querySelector('#webhook-enabled').onchange = (e) => { webhookEnabled = e.target.checked; };
+    gui.querySelector('#cfg-select').onchange = (e) => {
+        selectedProfileName = sanitizeConfigName(e.target.value || '');
+        persistProfiles();
+    };
+    gui.querySelector('#cfg-autoload').onchange = (e) => {
+        profileAutoLoadEnabled = !!e.target.checked;
+        persistProfiles();
+        showConfigStatus(profileAutoLoadEnabled ? 'Auto-load enabled.' : 'Auto-load disabled.');
+    };
+    gui.querySelector('#cfg-load-now').onclick = () => {
+        if (!selectedProfileName) {
+            showConfigStatus('Select a config first.');
+            return;
+        }
+        if (!loadProfileByName(selectedProfileName)) showConfigStatus('Could not load config.');
+    };
+    gui.querySelector('#cfg-overwrite').onclick = () => {
+        if (!selectedProfileName) {
+            showConfigStatus('Select a config first.');
+            return;
+        }
+        configProfiles[selectedProfileName] = captureCurrentConfig();
+        persistProfiles();
+        showConfigStatus(`Overwrote: ${selectedProfileName}`);
+    };
+    gui.querySelector('#cfg-delete').onclick = () => {
+        if (!selectedProfileName || !configProfiles[selectedProfileName]) {
+            showConfigStatus('Select a config first.');
+            return;
+        }
+        const target = selectedProfileName;
+        delete configProfiles[target];
+        selectedProfileName = '';
+        persistProfiles();
+        refreshConfigDropdown();
+        showConfigStatus(`Deleted: ${target}`);
+    };
+    gui.querySelector('#cfg-create').onclick = () => {
+        const nameInput = document.getElementById('cfg-name');
+        const cleanName = sanitizeConfigName(nameInput?.value || '');
+        if (!cleanName) {
+            showConfigStatus('Enter a config name.');
+            return;
+        }
+        if (configProfiles[cleanName]) {
+            showConfigStatus('Name exists. Use OVERWRITE or new name.');
+            return;
+        }
+        configProfiles[cleanName] = captureCurrentConfig();
+        selectedProfileName = cleanName;
+        if (nameInput) nameInput.value = '';
+        persistProfiles();
+        refreshConfigDropdown();
+        showConfigStatus(`Created: ${cleanName}`);
+    };
+    gui.querySelector('#cfg-export-json').onclick = async () => {
+        const payloadObj = exportSelectedProfilePayload();
+        const payload = JSON.stringify(payloadObj, null, 2);
+        const payloadEl = document.getElementById('cfg-payload');
+        if (payloadEl) payloadEl.value = payload;
+        try {
+            await navigator.clipboard.writeText(payload);
+            showConfigStatus(`Exported JSON: ${payloadObj.profileName}`);
+        } catch {
+            showConfigStatus(`Exported JSON to textbox: ${payloadObj.profileName}`);
+        }
+    };
+    gui.querySelector('#cfg-import').onclick = () => {
+        const payload = document.getElementById('cfg-payload')?.value || '';
+        const result = importProfilesPayload(payload);
+        if (!result.ok) {
+            showConfigStatus(result.reason);
+            return;
+        }
+        const autoEl = document.getElementById('cfg-autoload');
+        if (autoEl) autoEl.checked = profileAutoLoadEnabled;
+        const autoStartEl = document.getElementById('auto-start-chk');
+        if (autoStartEl) autoStartEl.checked = autoStartBotEnabled;
+        const watchdogEl = document.getElementById('watchdog-chk');
+        if (watchdogEl) watchdogEl.checked = gameWatchdogEnabled;
+        const toastWatchdogEl = document.getElementById('toast-watchdog-chk');
+        if (toastWatchdogEl) toastWatchdogEl.checked = toastWatchdogEnabled;
+        if (applyPendingBotStart) applyPendingBotStart();
+        if (autoStartBotEnabled && !isRunning) setBotRunning(true);
+        showConfigStatus(result.reason);
+    };
+
+    gui.querySelector('#test-wh-btn').onclick = () => {
+        sendWebhook('Dewdrop Crownfish', 'legendary', '15.7 oz', '+10.8kc', '1 in 500', null, true);
+    };
+
+    gui.querySelector('#c-minimize').onclick = () => {
+        if (!isMinimized) {
+            expandedHeight = gui.style.height;
+        }
+        isMinimized = !isMinimized;
+        applyMinimizedState();
+    };
+
+    gui.querySelector('#c-close').onclick = () => {
+        cleanupHelper();
+    };
+})();
